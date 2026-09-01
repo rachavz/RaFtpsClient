@@ -17,3 +17,6 @@ using System.Runtime.Versioning;
 [assembly: AssemblyProduct("RaFtpsClient")]
 [assembly: AssemblyTitle("RaFtpsClient")]
 [assembly: AssemblyVersion("22.5.31.2")]
+
+// The reply parsers and the listing parser are internal; the test project drives them directly.
+[assembly: InternalsVisibleTo("RaFtpsClient.Tests")]

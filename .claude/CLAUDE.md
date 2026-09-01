@@ -13,12 +13,23 @@ outside the csproj glob and is not compiled. Decompiler residue is still visible
 
 ```bash
 dotnet build                # netstandard2.0, must stay warning-clean
+dotnet test                 # tests/RaFtpsClient.Tests, net10.0, xunit
+dotnet test --filter FullyQualifiedName~KeepAliveTests
 ```
 
-There is no test project. To exercise `internal` parsers without a live server, compile the sources
-into a throwaway console project (`<Compile Include=".../RaFtpsClient/*.cs" />` with
-`EnableDefaultCompileItems=false`) so `internal` members stay reachable; the installed runtime is
-.NET 10, so target `net10.0`.
+`tests/RaFtpsClient.Tests` covers the parsers directly and drives the client end to end against
+`FakeFtpServer`, an in-process server on a loopback socket that speaks enough of RFC 959 for login,
+FEAT, PASV/EPSV, LIST/NLST, RETR/STOR/APPE/STOU and the error paths. Extend the fake rather than
+mocking sockets: its knobs (`ErrorReplies`, `SuppressPreliminaryReply`, `DropConnectionOn`,
+`UserReplyCode`, `Features`) exist so protocol edge cases stay expressible as data.
+
+The library exposes its pure helpers as `internal` and grants `InternalsVisibleTo` from the
+hand-written `Properties/AssemblyInfo.cs` — the SDK's `InternalsVisibleTo` item does nothing here
+because `GenerateAssemblyInfo` is off.
+
+Tests are only worth what a mutation proves: when fixing a bug, break the fix again and confirm the
+new test fails before keeping it. Two connection-level regressions were caught this way, including a
+dual-mode IPv6 socket that silently switched every IPv4 session to EPSV/EPRT.
 
 ## Conventions
 

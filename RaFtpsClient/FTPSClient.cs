@@ -124,6 +124,15 @@ public sealed class FTPSClient : IDisposable
     public bool KeepAliveStarted => keepAliveThread != null;
 
     /// <summary>
+    /// Gets or sets the interval in milliseconds between keep-alive NOOP commands. Defaults to 20000.
+    /// </summary>
+    public int KeepAliveTimeout
+    {
+        get { return keepAliveTimeout; }
+        set { keepAliveTimeout = value; }
+    }
+
+    /// <summary>
     /// Gets or sets the SSL/TLS protocol versions offered during the handshake. Defaults to
     /// <see cref="System.Security.Authentication.SslProtocols.None"/>, letting the operating system
     /// negotiate the strongest version both ends support. Set before calling Connect.
@@ -567,7 +576,7 @@ public sealed class FTPSClient : IDisposable
         }
     }
 
-    private static string GetUniquePath(IList<string> paths, string localFilePath)
+    internal static string GetUniquePath(IList<string> paths, string localFilePath)
     {
         string text = localFilePath;
         int num = 1;
@@ -1092,7 +1101,7 @@ public sealed class FTPSClient : IDisposable
         }
     }
 
-    private static string GetRegexPattern(string filePattern, EPatternStyle patternStyle)
+    internal static string GetRegexPattern(string filePattern, EPatternStyle patternStyle)
     {
         string text = filePattern;
         if ((uint)patternStyle <= 1u)
@@ -1208,26 +1217,31 @@ public sealed class FTPSClient : IDisposable
     {
         try
         {
-            Stream dataStream = GetDataStream();
-            StringBuilder stringBuilder = new StringBuilder();
-            // A shared Decoder carries partial multi-byte sequences across chunk boundaries; decoding
-            // each chunk on its own turns any character straddling one into U+FFFD.
-            Decoder decoder = Encoding.UTF8.GetDecoder();
-            byte[] array = new byte[transferBufferSize];
-            char[] chars = new char[Encoding.UTF8.GetMaxCharCount(array.Length)];
-            int num = 0;
-            do
-            {
-                num = dataStream.Read(array, 0, array.Length);
-                int charCount = decoder.GetChars(array, 0, num, chars, 0, num == 0);
-                stringBuilder.Append(chars, 0, charCount);
-            } while (num != 0);
-            return stringBuilder.ToString();
+            return ReadStreamAsUtf8(GetDataStream(), transferBufferSize);
         }
         finally
         {
             CloseDataConnection();
         }
+    }
+
+    internal static string ReadStreamAsUtf8(Stream stream, int bufferSize)
+    {
+        StringBuilder stringBuilder = new StringBuilder();
+        // A shared Decoder carries partial multi-byte sequences across read boundaries. Reads land
+        // wherever the network splits them, so decoding each one on its own turns any character
+        // unlucky enough to straddle a boundary into U+FFFD.
+        Decoder decoder = Encoding.UTF8.GetDecoder();
+        byte[] buffer = new byte[bufferSize];
+        char[] chars = new char[Encoding.UTF8.GetMaxCharCount(bufferSize)];
+        int read;
+        do
+        {
+            read = stream.Read(buffer, 0, buffer.Length);
+            int charCount = decoder.GetChars(buffer, 0, read, chars, 0, read == 0);
+            stringBuilder.Append(chars, 0, charCount);
+        } while (read != 0);
+        return stringBuilder.ToString();
     }
 
     private void SetupCtrlConnection(string hostname, int port)
@@ -1243,22 +1257,37 @@ public sealed class FTPSClient : IDisposable
     // TcpClient's connecting constructor blocks on the OS default, ignoring the configured timeout.
     private TcpClient ConnectWithTimeout(string host, int port)
     {
-        TcpClient client = new TcpClient();
-        try
+        IPAddress[] addresses = IPAddress.TryParse(host, out IPAddress literal)
+            ? new IPAddress[1] { literal }
+            : Dns.GetHostAddresses(host);
+        if (addresses.Length == 0)
         {
-            IAsyncResult ar = client.BeginConnect(host, port, null, null);
-            if (!ar.AsyncWaitHandle.WaitOne(timeout))
+            throw new FTPException("Could not resolve " + host);
+        }
+        Exception lastError = null;
+        foreach (IPAddress address in addresses)
+        {
+            // One socket per address family. A parameterless TcpClient would open a dual mode IPv6
+            // socket even for an IPv4 server, and the control channel's family is what decides
+            // between PASV/PORT and EPSV/EPRT.
+            TcpClient client = new TcpClient(address.AddressFamily);
+            try
             {
-                throw new FTPException("Timeout connecting to " + host + ":" + port);
+                IAsyncResult ar = client.BeginConnect(address, port, null, null);
+                if (!ar.AsyncWaitHandle.WaitOne(timeout))
+                {
+                    throw new FTPException("Timeout connecting to " + host + ":" + port);
+                }
+                client.EndConnect(ar);
+                return client;
             }
-            client.EndConnect(ar);
-            return client;
+            catch (Exception ex)
+            {
+                client.Close();
+                lastError = ex;
+            }
         }
-        catch
-        {
-            client.Close();
-            throw;
-        }
+        throw new FTPException("Could not connect to " + host + ":" + port, lastError);
     }
 
     private void SetupCtrlStreamReaderAndWriter(Stream s)
@@ -1404,7 +1433,7 @@ public sealed class FTPSClient : IDisposable
         return true;
     }
 
-    private static string ParsePwdReply(FTPReply reply)
+    internal static string ParsePwdReply(FTPReply reply)
     {
         int num = reply.Message.IndexOf('"');
         if (num < 0) throw new FTPProtocolException(reply);
@@ -1413,7 +1442,7 @@ public sealed class FTPSClient : IDisposable
         return reply.Message.Substring(num + 1, num2 - num - 1);
     }
 
-    private static IPEndPoint ParsePasvReply(FTPReply reply)
+    internal static IPEndPoint ParsePasvReply(FTPReply reply)
     {
         int num = reply.Message.IndexOf('(');
         if (num < 0) throw new FTPProtocolException(reply);
@@ -1432,12 +1461,16 @@ public sealed class FTPSClient : IDisposable
 
     private IPEndPoint ParseEpsvReply(FTPReply reply)
     {
-        string[] array = reply.Message.Split(new char[1] { '|' });
-        if (array.Length != 5) throw new FTPProtocolException(reply);
-        int port = int.Parse(array[3]);
         // EPSV returns only a port: the address is always the server's, i.e. the control channel's
         // remote end, never the client's own local endpoint.
-        return new IPEndPoint(((IPEndPoint)ctrlClient.Client.RemoteEndPoint).Address, port);
+        return new IPEndPoint(((IPEndPoint)ctrlClient.Client.RemoteEndPoint).Address, ParseEpsvPort(reply));
+    }
+
+    internal static int ParseEpsvPort(FTPReply reply)
+    {
+        string[] array = reply.Message.Split(new char[1] { '|' });
+        if (array.Length != 5) throw new FTPProtocolException(reply);
+        return int.Parse(array[3]);
     }
 
     private FTPReply HandleCmd(string command)
@@ -1459,7 +1492,7 @@ public sealed class FTPSClient : IDisposable
         }
     }
 
-    private static string MaskCredentials(string command)
+    internal static string MaskCredentials(string command)
     {
         if (command.StartsWith("PASS ", StringComparison.OrdinalIgnoreCase))
         {
@@ -1473,7 +1506,7 @@ public sealed class FTPSClient : IDisposable
         if (ctrlClient == null) throw new FTPException("Not connected");
     }
 
-    private static void CheckCommandInjection(string command)
+    internal static void CheckCommandInjection(string command)
     {
         // A bare CR or LF is enough: most servers accept either as a command terminator, so a remote
         // name carrying one would smuggle a second command onto the control channel.
@@ -1483,7 +1516,7 @@ public sealed class FTPSClient : IDisposable
         }
     }
 
-    private static string CombineRemotePath(string path1, string path2)
+    internal static string CombineRemotePath(string path1, string path2)
     {
         return (path1.EndsWith("/") ? path1 : (path1 + "/")) + path2;
     }
@@ -1601,7 +1634,7 @@ public sealed class FTPSClient : IDisposable
         fileName = ParseStouReply(reply);
     }
 
-    private static string ParseStouReply(FTPReply reply)
+    internal static string ParseStouReply(FTPReply reply)
     {
         int num = reply.Message.LastIndexOf(' ');
         if (num < 0) throw new FTPProtocolException(reply);
@@ -1740,7 +1773,7 @@ public sealed class FTPSClient : IDisposable
     private DateTime MdtmCmd(string fileName) { return ParseFTPDateTime(HandleCmd("MDTM " + fileName).Message); }
     private ulong SizeCmd(string fileName) { return ulong.Parse(HandleCmd("SIZE " + fileName).Message); }
 
-    private static DateTime ParseFTPDateTime(string message)
+    internal static DateTime ParseFTPDateTime(string message)
     {
         return DateTime.ParseExact(message, "yyyyMMddHHmmss.FFF", CultureInfo.GetCultureInfo("en-US"), DateTimeStyles.AssumeUniversal);
     }

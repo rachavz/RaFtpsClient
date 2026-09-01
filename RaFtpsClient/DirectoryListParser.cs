@@ -107,7 +107,8 @@ internal class DirectoryListParser
         }
         DirectoryListItem directoryListItem = new DirectoryListItem();
         string text = record.Trim();
-        directoryListItem.Flags = text.Substring(0, 9);
+        // Type character plus nine permission bits: taking only nine dropped the world-execute bit.
+        directoryListItem.Flags = text.Substring(0, 10);
         directoryListItem.IsDirectory = directoryListItem.Flags[0] == 'd';
         directoryListItem.IsSymLink = directoryListItem.Flags[0] == 'l';
         text = text.Substring(11).Trim();
