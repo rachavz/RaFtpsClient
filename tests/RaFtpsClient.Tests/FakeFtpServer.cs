@@ -1,12 +1,25 @@
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 
 namespace RaFtpsClient.Tests;
 
+internal enum FakeTlsMode
+{
+    /// <summary>No TLS at all; AUTH is rejected.</summary>
+    None,
+    /// <summary>TLS offered through AUTH TLS on a clear-text control channel.</summary>
+    Explicit,
+    /// <summary>The control channel is TLS from the first byte, before the banner.</summary>
+    Implicit
+}
+
 /// <summary>
-/// An in-process FTP server speaking just enough of RFC 959 to drive <see cref="FTPSClient"/> over a
-/// loopback socket. Clear text only: TLS would need a certificate and is covered by unit tests.
+/// An in-process FTP server speaking just enough of RFC 959 and RFC 4217 to drive
+/// <see cref="FTPSClient"/> over a loopback socket.
 /// </summary>
 internal sealed class FakeFtpServer : IDisposable
 {
@@ -38,6 +51,19 @@ internal sealed class FakeFtpServer : IDisposable
     public bool SuppressPreliminaryReply { get; set; }
     /// <summary>Drop the control connection instead of answering this command.</summary>
     public string DropConnectionOn { get; set; }
+
+    public FakeTlsMode TlsMode { get; set; } = FakeTlsMode.None;
+    /// <summary>Certificate presented to the client; defaults to the shared self-signed one.</summary>
+    public X509Certificate2 Certificate { get; set; } = TestCertificate.Server;
+    /// <summary>Certificate presented on data connections; defaults to <see cref="Certificate"/>.
+    /// Set it to a different one to simulate a substituted certificate mid-session.</summary>
+    public X509Certificate2 DataCertificate { get; set; }
+    /// <summary>TLS versions the server will accept. None lets the OS decide.</summary>
+    public SslProtocols ServerSslProtocols { get; set; } = SslProtocols.None;
+    /// <summary>Answer PROT with a refusal, to exercise the client's downgrade handling.</summary>
+    public bool RejectProt { get; set; }
+    /// <summary>True once a data connection has actually completed a TLS handshake.</summary>
+    public bool DataChannelWasEncrypted { get; private set; }
 
     public FakeFtpServer(bool useIPv6 = false)
     {
@@ -76,17 +102,32 @@ internal sealed class FakeFtpServer : IDisposable
         }
     }
 
+    private SslStream WrapAsServer(Stream inner, bool leaveInnerStreamOpen, X509Certificate2 certificate = null)
+    {
+        var ssl = new SslStream(inner, leaveInnerStreamOpen);
+        ssl.AuthenticateAsServer(certificate ?? Certificate, clientCertificateRequired: false,
+            ServerSslProtocols, checkCertificateRevocation: false);
+        return ssl;
+    }
+
     private void Serve(TcpClient client)
     {
         TcpListener dataListener = null;
         bool activeModeRequested = false;
+        bool dataProtected = false;
         try
         {
             using (client)
-            using (var stream = client.GetStream())
             {
-                var reader = new StreamReader(stream, new UTF8Encoding(false));
-                var writer = new StreamWriter(stream, new UTF8Encoding(false)) { NewLine = "\r\n", AutoFlush = true };
+                Stream controlStream = client.GetStream();
+                if (TlsMode == FakeTlsMode.Implicit)
+                {
+                    controlStream = WrapAsServer(controlStream, leaveInnerStreamOpen: false);
+                }
+
+                var encoding = new UTF8Encoding(false);
+                var reader = new StreamReader(controlStream, encoding);
+                var writer = new StreamWriter(controlStream, encoding) { NewLine = "\r\n", AutoFlush = true };
                 writer.WriteLine("220 FakeFtpServer ready.");
 
                 string line;
@@ -109,6 +150,30 @@ internal sealed class FakeFtpServer : IDisposable
 
                     switch (verb)
                     {
+                        case "AUTH":
+                            if (TlsMode != FakeTlsMode.Explicit)
+                            {
+                                writer.WriteLine("534 Request denied for policy reasons.");
+                                break;
+                            }
+                            // The acknowledgement goes out in clear text; the handshake follows it.
+                            writer.WriteLine("234 AUTH " + arg + " OK.");
+                            controlStream = WrapAsServer(client.GetStream(), leaveInnerStreamOpen: true);
+                            reader = new StreamReader(controlStream, encoding);
+                            writer = new StreamWriter(controlStream, encoding) { NewLine = "\r\n", AutoFlush = true };
+                            break;
+                        case "PBSZ":
+                            writer.WriteLine("200 PBSZ=0");
+                            break;
+                        case "PROT":
+                            if (RejectProt)
+                            {
+                                writer.WriteLine("534 Request denied for policy reasons.");
+                                break;
+                            }
+                            dataProtected = arg.Equals("P", StringComparison.OrdinalIgnoreCase);
+                            writer.WriteLine("200 PROT command successful.");
+                            break;
                         case "USER":
                             writer.WriteLine(UserReplyCode == 230
                                 ? "230 " + WelcomeMessage
@@ -179,25 +244,25 @@ internal sealed class FakeFtpServer : IDisposable
                             break;
                         }
                         case "LIST":
-                            TransferOut(writer, dataListener, Encoding.UTF8.GetBytes(ListingText), activeModeRequested);
+                            TransferOut(writer, dataListener, Encoding.UTF8.GetBytes(ListingText), dataProtected, activeModeRequested);
                             dataListener = null;
                             break;
                         case "NLST":
-                            TransferOut(writer, dataListener, Encoding.UTF8.GetBytes(ShortListingText), activeModeRequested);
+                            TransferOut(writer, dataListener, Encoding.UTF8.GetBytes(ShortListingText), dataProtected, activeModeRequested);
                             dataListener = null;
                             break;
                         case "RETR":
-                            TransferOut(writer, dataListener, FileContent, activeModeRequested);
+                            TransferOut(writer, dataListener, FileContent, dataProtected, activeModeRequested);
                             dataListener = null;
                             break;
                         case "STOR":
                         case "APPE":
-                            TransferIn(writer, dataListener, "150 Opening data connection.");
+                            TransferIn(writer, dataListener, "150 Opening data connection.", dataProtected);
                             dataListener = null;
                             break;
                         case "STOU":
                             // RFC 1123 puts the generated name in the preliminary reply.
-                            TransferIn(writer, dataListener, "150 FILE: " + StouName);
+                            TransferIn(writer, dataListener, "150 FILE: " + StouName, dataProtected);
                             dataListener = null;
                             break;
                         case "QUIT":
@@ -212,13 +277,26 @@ internal sealed class FakeFtpServer : IDisposable
         }
         catch (IOException) { }
         catch (ObjectDisposedException) { }
+        catch (AuthenticationException) { }
         finally
         {
             dataListener?.Stop();
         }
     }
 
-    private void TransferOut(StreamWriter writer, TcpListener dataListener, byte[] payload, bool activeModeRequested = false)
+    private Stream AcceptDataStream(TcpClient data, bool dataProtected)
+    {
+        if (!dataProtected)
+        {
+            return data.GetStream();
+        }
+        Stream ssl = WrapAsServer(data.GetStream(), leaveInnerStreamOpen: false, DataCertificate);
+        DataChannelWasEncrypted = true;
+        return ssl;
+    }
+
+    private void TransferOut(StreamWriter writer, TcpListener dataListener, byte[] payload,
+        bool dataProtected, bool activeModeRequested = false)
     {
         if (dataListener == null)
         {
@@ -227,7 +305,7 @@ internal sealed class FakeFtpServer : IDisposable
         }
         if (!SuppressPreliminaryReply) writer.WriteLine("150 Opening data connection.");
         using (TcpClient data = dataListener.AcceptTcpClient())
-        using (NetworkStream ds = data.GetStream())
+        using (Stream ds = AcceptDataStream(data, dataProtected))
         {
             ds.Write(payload, 0, payload.Length);
             ds.Flush();
@@ -236,7 +314,8 @@ internal sealed class FakeFtpServer : IDisposable
         writer.WriteLine("226 Transfer complete.");
     }
 
-    private void TransferIn(StreamWriter writer, TcpListener dataListener, string preliminaryReply)
+    private void TransferIn(StreamWriter writer, TcpListener dataListener, string preliminaryReply,
+        bool dataProtected)
     {
         if (dataListener == null)
         {
@@ -247,7 +326,7 @@ internal sealed class FakeFtpServer : IDisposable
         using (var received = new MemoryStream())
         {
             using (TcpClient data = dataListener.AcceptTcpClient())
-            using (NetworkStream ds = data.GetStream())
+            using (Stream ds = AcceptDataStream(data, dataProtected))
             {
                 ds.CopyTo(received);
             }

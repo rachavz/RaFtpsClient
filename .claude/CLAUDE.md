@@ -18,10 +18,20 @@ dotnet test --filter FullyQualifiedName~KeepAliveTests
 ```
 
 `tests/RaFtpsClient.Tests` covers the parsers directly and drives the client end to end against
-`FakeFtpServer`, an in-process server on a loopback socket that speaks enough of RFC 959 for login,
-FEAT, PASV/EPSV, LIST/NLST, RETR/STOR/APPE/STOU and the error paths. Extend the fake rather than
-mocking sockets: its knobs (`ErrorReplies`, `SuppressPreliminaryReply`, `DropConnectionOn`,
-`UserReplyCode`, `Features`) exist so protocol edge cases stay expressible as data.
+`FakeFtpServer`, an in-process server on a loopback socket that speaks enough of RFC 959 and RFC 4217
+for login, FEAT, AUTH TLS, PBSZ/PROT, PASV/EPSV, LIST/NLST, RETR/STOR/APPE/STOU and the error paths.
+Extend the fake rather than mocking sockets: its knobs (`ErrorReplies`, `SuppressPreliminaryReply`,
+`DropConnectionOn`, `UserReplyCode`, `Features`, `TlsMode`, `RejectProt`, `DataCertificate`) exist so
+protocol edge cases stay expressible as data.
+
+`TestCertificate` generates self-signed certificates in memory, so no fixture files are needed. It
+also exposes `Twin` — a certificate sharing `Server`'s issuer name and serial number but with a
+different key, which is what makes the framework's `X509Certificate.Equals` treat the two as
+identical and is the substitution the pinning check has to catch.
+
+One gap is deliberate and documented in `TlsTests`: that `SslCheckCertRevocation` reaches
+`AuthenticateAsClient` is not covered, because a chain over a self-signed certificate stops at
+`UntrustedRoot` before revocation is consulted.
 
 The library exposes its pure helpers as `internal` and grants `InternalsVisibleTo` from the
 hand-written `Properties/AssemblyInfo.cs` — the SDK's `InternalsVisibleTo` item does nothing here
