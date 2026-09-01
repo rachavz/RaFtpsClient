@@ -1,0 +1,35 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>RaFtpsClient</AssemblyName>
+    <RootNamespace>RaFtpsClient</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>CS1591</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PackageId>RaFtpsClient</PackageId>
+    <Version>22.5.31.2</Version>
+    <Authors>Raúl Chávez Vázquez</Authors>
+    <Description>Free FTP/FTPS client and class library available on any platform supporting .NET Standard 2.0+. Written to overcome the limits of .NET's System.Net.FTPWebRequest in terms of FTPS support.</Description>
+    <Copyright>Copyright (c) 2022 - 2099 Raúl Chávez Vázquez</Copyright>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>ftp;ftps;ftp-client;ftps-client;ssl;tls;netstandard</PackageTags>
+    <RepositoryUrl>https://github.com/rachavz/RaFtpsClient</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/rachavz/RaFtpsClient</PackageProjectUrl>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\LICENSE" Pack="true" PackagePath="" />
+    <None Include="..\README.md" Pack="true" PackagePath="" />
+  </ItemGroup>
+
+</Project>

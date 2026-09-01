@@ -1,0 +1,21 @@
+# Build output
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+*.user
+*.suo
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+
+# IDE / editor
+.vs/
+.vscode/
+.idea/
+*.swp
+
+# Local Claude state
+.claude/settings.local.json
