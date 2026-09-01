@@ -17,5 +17,5 @@ packages/
 .idea/
 *.swp
 
-# Local Claude state
+# Local editor/tool settings
 .claude/settings.local.json
