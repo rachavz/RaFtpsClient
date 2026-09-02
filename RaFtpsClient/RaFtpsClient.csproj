@@ -16,7 +16,7 @@
     <Authors>Raúl Chávez Vázquez</Authors>
     <Product>RaFtpsClient</Product>
     <Description>Free FTP/FTPS client and class library available on any platform supporting .NET Standard 2.0+. Written to overcome the limits of .NET's System.Net.FTPWebRequest in terms of FTPS support.</Description>
-    <Copyright>Copyright (c) 2022-2026 Raúl Chávez Vázquez. Derived from AlexFTPS, Copyright (c) Alessandro Pilotti.</Copyright>
+    <Copyright>Copyright (c) 2022-2026 Raúl Chávez Vázquez. Portions Copyright (c) 2008 Alessandro Pilotti.</Copyright>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>ftp;ftps;ftp-client;ftps-client;ssl;tls;netstandard</PackageTags>

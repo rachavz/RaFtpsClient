@@ -71,5 +71,4 @@ client.SslCheckCertRevocation = false;      // only if the CRL/OCSP endpoint is 
 
 LGPL-3.0 - see [LICENSE](LICENSE) for details.
 
-Derived from [AlexFTPS](https://github.com/alexpilotti/AlexFTPS) by Alessandro Pilotti, also
-LGPL-3.0.
+Portions Copyright (c) 2008 Alessandro Pilotti, licensed under the LGPL.
