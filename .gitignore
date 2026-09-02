@@ -19,3 +19,6 @@ packages/
 
 # Local editor/tool settings
 .claude/settings.local.json
+
+# Local reference material (decompiled upstream, original nupkg); not part of the source
+temp/

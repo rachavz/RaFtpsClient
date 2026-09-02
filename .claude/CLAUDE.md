@@ -5,8 +5,8 @@ FTP/FTPS client library. Single assembly, no dependencies.
 ## Origin
 
 The source is a decompilation of **AlexFTPS** (Alessandro Pilotti, LGPL-3.0), cleaned up and
-re-namespaced. `temp/RaFtpsClient_decompiled.cs` is the raw ILSpy output kept for reference; it is
-outside the csproj glob and is not compiled. Decompiler residue is still visible in the live source
+re-namespaced. `temp/` holds the raw ILSpy output and the original 22.5.31.2 nupkg for reference; it
+is git-ignored and local only, never part of the source or the package. Decompiler residue is still visible in the live source
 (unused locals/constants, `num`/`text2` names, redundant assignments) — normal to clean up on touch.
 
 ## Build / test
@@ -33,9 +33,8 @@ One gap is deliberate and documented in `TlsTests`: that `SslCheckCertRevocation
 `AuthenticateAsClient` is not covered, because a chain over a self-signed certificate stops at
 `UntrustedRoot` before revocation is consulted.
 
-The library exposes its pure helpers as `internal` and grants `InternalsVisibleTo` from the
-hand-written `Properties/AssemblyInfo.cs` — the SDK's `InternalsVisibleTo` item does nothing here
-because `GenerateAssemblyInfo` is off.
+The library exposes its pure helpers as `internal` and grants `InternalsVisibleTo` through the
+csproj item.
 
 Tests are only worth what a mutation proves: when fixing a bug, break the fix again and confirm the
 new test fails before keeping it. Two connection-level regressions were caught this way, including a
@@ -48,8 +47,9 @@ dual-mode IPv6 socket that silently switched every IPv4 session to EPSV/EPRT.
   span APIs) — cast numerics when a newer TLS constant is needed.
 - Public API is XML-documented; `GenerateDocumentationFile` is on, so every new public member needs
   a doc comment.
-- Version lives in **two** places that must be kept in sync: `RaFtpsClient.csproj` `<Version>` and the
-  hand-written `Properties/AssemblyInfo.cs` (`GenerateAssemblyInfo` is off).
+- Version lives only in `RaFtpsClient.csproj` `<Version>`, scheme `yy.M.d.build`; the SDK generates
+  the assembly attributes. Behaviour changes go in `<PackageReleaseNotes>` there too.
+- `dotnet pack RaFtpsClient/RaFtpsClient.csproj -c Release` builds the nupkg; check it with `unzip -l`.
 
 ## Architecture
 

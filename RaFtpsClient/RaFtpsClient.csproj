@@ -1,22 +1,22 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>netstandard2.0</TargetFramework>
     <AssemblyName>RaFtpsClient</AssemblyName>
     <RootNamespace>RaFtpsClient</RootNamespace>
     <LangVersion>latest</LangVersion>
-    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
-    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>CS1591</NoWarn>
   </PropertyGroup>
 
   <PropertyGroup>
+    <!-- Single source of truth for the assembly, file and package versions. Scheme: yy.M.d.build. -->
+    <Version>26.9.2.1</Version>
     <PackageId>RaFtpsClient</PackageId>
-    <Version>22.5.31.2</Version>
     <Authors>Raúl Chávez Vázquez</Authors>
+    <Product>RaFtpsClient</Product>
     <Description>Free FTP/FTPS client and class library available on any platform supporting .NET Standard 2.0+. Written to overcome the limits of .NET's System.Net.FTPWebRequest in terms of FTPS support.</Description>
-    <Copyright>Copyright (c) 2022 - 2099 Raúl Chávez Vázquez</Copyright>
+    <Copyright>Copyright (c) 2022-2026 Raúl Chávez Vázquez. Derived from AlexFTPS, Copyright (c) Alessandro Pilotti.</Copyright>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>ftp;ftps;ftp-client;ftps-client;ssl;tls;netstandard</PackageTags>
@@ -25,11 +25,36 @@
     <PackageProjectUrl>https://github.com/rachavz/RaFtpsClient</PackageProjectUrl>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
+    <PackageReleaseNotes>
+Behaviour changes:
+- Server certificate revocation is checked by default (SslCheckCertRevocation to disable).
+- TLS version is negotiated by the OS (SslProtocols to pin one); TLS 1.0/1.1 are no longer offered.
+- A refused PROT on an implicit FTPS connection throws FTPSslException instead of silently continuing.
+- The PASS argument is masked in the LogCommand event.
+- KeepAliveTimeout is configurable.
+
+Fixes:
+- Connect overload ignored useCtrlEndPointAddressForData.
+- Keep-alive could not be restarted, and could consume a transfer's completion reply.
+- Command injection through a bare CR or LF in a remote name.
+- Certificate pinning compared issuer and serial only.
+- PutUniqueFile returned a truncated name; SSL mode flags were corrupted after a PROT failure.
+- Listings: non-ASCII names split across reads, listings of only symlinks or setgid/sticky
+  directories parsed as empty, one bad record discarded the whole listing, the permission field
+  lost its last character, and time-only dates could land in the future.
+- EPSV used the local address; active mode was IPv4-only with no accept timeout; connect ignored
+  the timeout; a closed control connection surfaced as a null reference.
+    </PackageReleaseNotes>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="..\LICENSE" Pack="true" PackagePath="" />
     <None Include="..\README.md" Pack="true" PackagePath="" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The reply parsers and the listing parser are internal; the test project drives them directly. -->
+    <InternalsVisibleTo Include="RaFtpsClient.Tests" />
   </ItemGroup>
 
 </Project>
