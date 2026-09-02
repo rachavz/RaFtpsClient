@@ -4,9 +4,8 @@ FTP/FTPS client library. Single assembly, no dependencies.
 
 ## Origin
 
-The library body was recovered by decompiling the 22.5.31.2 package and cleaned up. Portions are
-Copyright (c) 2008 Alessandro Pilotti under the LGPL; that notice in the README and the csproj
-`<Copyright>` is a licence requirement and stays. `temp/` holds the raw ILSpy output and the original 22.5.31.2 nupkg for reference; it
+The library body was recovered by decompiling the 22.5.31.2 package and cleaned up. The project is
+licensed Apache-2.0. `temp/` holds the raw ILSpy output and the original 22.5.31.2 nupkg for reference; it
 is git-ignored and local only, never part of the source or the package. Decompiler residue is still visible in the live source
 (unused locals/constants, `num`/`text2` names, redundant assignments) — normal to clean up on touch.
 

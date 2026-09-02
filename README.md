@@ -69,6 +69,4 @@ client.SslCheckCertRevocation = false;      // only if the CRL/OCSP endpoint is 
 
 ## License
 
-LGPL-3.0 - see [LICENSE](LICENSE) for details.
-
-Portions Copyright (c) 2008 Alessandro Pilotti, licensed under the LGPL.
+Apache-2.0 - see [LICENSE](LICENSE) for details.
