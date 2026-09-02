@@ -20,6 +20,7 @@ Targets .NET Standard 2.0, so it can be referenced from .NET Framework 4.6.1+, .
 - Keep-alive support
 - Custom FTP commands
 - Certificate validation callbacks
+- Synchronous and asynchronous APIs over one session, with `CancellationToken` support
 
 ## Quick Start
 
@@ -38,6 +39,23 @@ foreach (var f in files)
 client.GetFile("remote.txt", "local.txt");
 client.Close();
 ```
+
+Every operation has an `*Async` counterpart. The two share the session, so they can be mixed:
+
+```csharp
+using var client = new FTPSClient();
+await client.ConnectAsync("ftp.example.com", new NetworkCredential("user", "pass"),
+    ESSLSupportMode.CredentialsRequired, cancellationToken: ct);
+
+foreach (var f in await client.GetDirectoryListAsync(cancellationToken: ct))
+    Console.WriteLine($"{f.Name} ({f.Size} bytes)");
+
+await client.GetFileAsync("remote.txt", "local.txt", cancellationToken: ct);
+```
+
+The configured timeout applies to both paths: synchronous calls through the socket timeouts,
+asynchronous ones through an internal deadline that surfaces as `FTPException`. Cancelling a
+transfer mid-way leaves the session usable; the server's abort reply is consumed for you.
 
 ## TLS defaults
 

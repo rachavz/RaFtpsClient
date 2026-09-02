@@ -53,8 +53,34 @@ dual-mode IPv6 socket that silently switched every IPv4 session to EPSV/EPRT.
 
 ## Architecture
 
-- `FTPSClient` — connection state machine, one `*Cmd()` private method per FTP verb; every command
-  funnels through `HandleCmd` → `GetReply`, both `[MethodImpl(Synchronized)]`.
-- Control channel: `TcpClient` + `StreamReader/Writer`, optionally wrapped in `SslStream`.
-- Data channel: separate `TcpClient` per transfer, torn down by the `FTPStream` close callback.
+`FTPSClient` is a partial class split by responsibility, and every operation exists in a
+synchronous and an asynchronous form that sit next to each other in the same file. When you change
+one, the other is visibly missing the change — that adjacency is the whole point of the layout.
+
+- `FTPSClient.cs` — state, properties, events, `Connect`/`ConnectAsync`, keep-alive thread, TLS
+  negotiation policy, session settings. `PrepareConnection` is the single definition of "a fresh
+  session"; the policy decisions (`OnAuthRefused`, `OnProtRefused`) are shared helpers so the
+  sync/async pairs only sequence commands.
+- `FTPSClient.ControlChannel.cs` — connect with timeout (one socket per address family, never a
+  dual-mode socket: the family decides PASV/PORT vs EPSV/EPRT), TLS wrapping, `HandleCmd`/`GetReply`
+  and their async twins. The lock is a `SemaphoreSlim`, which is **not re-entrant**: code that runs
+  while it is held must call the `*Core` variants. `ReplyAccumulator` parses multi-line replies for
+  both paths.
+- `ControlChannelReader` — line reader with sync and async reads over one buffer; replaced
+  `StreamReader`, whose `ReadLineAsync` takes no token and whose read-ahead is stranded on the
+  AUTH TLS stream swap.
+- `FTPSClient.DataChannel.cs` — passive/active setup, `GetDataStream(Async)`, `ReadStreamAsUtf8(Async)`
+  with a shared `Decoder`, and `ReadTransferCompletionReply(Async)` gated on `waitingCompletionReply`.
+- `FTPSClient.Commands.cs` — `Cmd.*` verb formatters and reply parsers, all pure.
+- `FTPSClient.Files.cs` — transfers. The async path settles the control channel through
+  `RunTransferAsync`: on failure it consumes the server's 426/451 so the next command does not read a
+  stale reply, which is what `FTPStream`'s close callback does for the sync path.
+- `FTPSClient.Directories.cs` — listings and working directory.
 - `DirectoryListParser` — heuristic LIST parsing (Unix `ls -l` and Windows styles); no MLSD support.
+
+Timeouts: the sync path relies on `ReadTimeout`/`WriteTimeout`, which do nothing for async I/O, so the
+async path enforces the same `timeout` through `TimeoutScope` (a linked CTS with `CancelAfter`),
+re-armed per operation on transfers. A timeout surfaces as `FTPException`; the caller's own token
+surfaces as `OperationCanceledException`. Stream-returning async variants (`GetFileAsync(remote)`
+returning a stream) are deliberately absent: netstandard2.0 has no `IAsyncDisposable`, so the
+completion-reply-on-close contract cannot be expressed cleanly.

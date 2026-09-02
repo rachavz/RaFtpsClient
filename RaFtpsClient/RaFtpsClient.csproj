@@ -26,6 +26,11 @@
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
     <PackageReleaseNotes>
+New:
+- Asynchronous API: every operation has an *Async counterpart taking a CancellationToken. Both
+  paths share the session and the configured timeout; cancelling a transfer mid-way leaves the
+  session usable.
+
 Behaviour changes:
 - Server certificate revocation is checked by default (SslCheckCertRevocation to disable).
 - TLS version is negotiated by the OS (SslProtocols to pin one); TLS 1.0/1.1 are no longer offered.

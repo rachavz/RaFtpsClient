@@ -1,37 +1,59 @@
 using System;
-using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Net;
-using System.Net.Sockets;
 using System.Net.Security;
-using System.Security.Authentication;
+using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace RaFtpsClient;
 
 // Control channel transport: connection, TLS wrapping, command/reply exchange and its lock.
+// Every operation exists in a synchronous and an asynchronous form over the same state; the two
+// are kept adjacent so a change to one is visibly missing from the other.
 public sealed partial class FTPSClient
 {
+    private static readonly Regex replyLinePattern = new Regex("^([0-9]{3})([\\s\\-])(.*)$", RegexOptions.Compiled);
+    private static readonly Encoding controlEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+
+    // ----- connection -----------------------------------------------------------------------------
+
     private void SetupCtrlConnection(string hostname, int port)
     {
         CloseCtrlConnection();
         ctrlClient = ConnectWithTimeout(hostname, port);
-        Stream stream = ctrlClient.GetStream();
-        stream.ReadTimeout = timeout;
-        stream.WriteTimeout = timeout;
-        SetupCtrlStreamReaderAndWriter(stream);
+        BindControlStream(ctrlClient.GetStream());
+    }
+
+    private async Task SetupCtrlConnectionAsync(string hostname, int port, CancellationToken cancellationToken)
+    {
+        CloseCtrlConnection();
+        ctrlClient = await ConnectWithTimeoutAsync(hostname, port, cancellationToken).ConfigureAwait(false);
+        BindControlStream(ctrlClient.GetStream());
+    }
+
+    private static IPAddress[] ResolveHost(string host)
+    {
+        return IPAddress.TryParse(host, out IPAddress literal) ? new IPAddress[1] { literal } : Dns.GetHostAddresses(host);
+    }
+
+    private static async Task<IPAddress[]> ResolveHostAsync(string host)
+    {
+        return IPAddress.TryParse(host, out IPAddress literal)
+            ? new IPAddress[1] { literal }
+            : await Dns.GetHostAddressesAsync(host).ConfigureAwait(false);
     }
 
     // TcpClient's connecting constructor blocks on the OS default, ignoring the configured timeout.
+    // One socket per address family: a parameterless TcpClient would open a dual mode IPv6 socket
+    // even for an IPv4 server, and the control channel's family is what decides between PASV/PORT
+    // and EPSV/EPRT.
     private TcpClient ConnectWithTimeout(string host, int port)
     {
-        IPAddress[] addresses = IPAddress.TryParse(host, out IPAddress literal)
-            ? new IPAddress[1] { literal }
-            : Dns.GetHostAddresses(host);
+        IPAddress[] addresses = ResolveHost(host);
         if (addresses.Length == 0)
         {
             throw new FTPException("Could not resolve " + host);
@@ -39,9 +61,6 @@ public sealed partial class FTPSClient
         Exception lastError = null;
         foreach (IPAddress address in addresses)
         {
-            // One socket per address family. A parameterless TcpClient would open a dual mode IPv6
-            // socket even for an IPv4 server, and the control channel's family is what decides
-            // between PASV/PORT and EPSV/EPRT.
             TcpClient client = new TcpClient(address.AddressFamily);
             try
             {
@@ -62,36 +81,126 @@ public sealed partial class FTPSClient
         throw new FTPException("Could not connect to " + host + ":" + port, lastError);
     }
 
-    private void SetupCtrlStreamReaderAndWriter(Stream s)
+    private async Task<TcpClient> ConnectWithTimeoutAsync(string host, int port, CancellationToken cancellationToken)
     {
-        if (ctrlSw != null)
+        IPAddress[] addresses = await ResolveHostAsync(host).ConfigureAwait(false);
+        if (addresses.Length == 0)
         {
-            ctrlSw.Flush();
+            throw new FTPException("Could not resolve " + host);
         }
-        Encoding encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
-        ctrlSr = new StreamReader(s, encoding);
-        ctrlSw = new StreamWriter(s, encoding);
-        ctrlSw.NewLine = "\r\n";
+        Exception lastError = null;
+        foreach (IPAddress address in addresses)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            TcpClient client = new TcpClient(address.AddressFamily);
+            try
+            {
+                using (CancellationTokenSource scope = TimeoutScope(cancellationToken))
+                {
+                    Task connect = client.ConnectAsync(address, port);
+                    Task finished = await Task.WhenAny(connect, Task.Delay(Timeout.Infinite, scope.Token)).ConfigureAwait(false);
+                    if (finished != connect)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        throw new FTPException("Timeout connecting to " + host + ":" + port);
+                    }
+                    await connect.ConfigureAwait(false);
+                    return client;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                client.Close();
+                throw;
+            }
+            catch (Exception ex)
+            {
+                client.Close();
+                lastError = ex;
+            }
+        }
+        throw new FTPException("Could not connect to " + host + ":" + port, lastError);
     }
+
+    // The configured timeout applies to asynchronous operations through a linked token, since
+    // ReadTimeout/WriteTimeout only govern the synchronous calls.
+    private CancellationTokenSource TimeoutScope(CancellationToken cancellationToken)
+    {
+        CancellationTokenSource scope = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        scope.CancelAfter(timeout);
+        return scope;
+    }
+
+    private void BindControlStream(Stream s)
+    {
+        s.ReadTimeout = timeout;
+        s.WriteTimeout = timeout;
+        ctrlStream = s;
+        ctrlReader = new ControlChannelReader(s);
+    }
+
+    // ----- TLS ------------------------------------------------------------------------------------
 
     private void SwitchCtrlToSSLMode()
     {
-        ctrlSslStream = CreateSSlStream(ctrlClient.GetStream(), leaveInnerStreamOpen: true);
-        SetupCtrlStreamReaderAndWriter(ctrlSslStream);
+        ctrlSslStream = CreateSslStream(ctrlClient.GetStream(), leaveInnerStreamOpen: true);
+        BindControlStream(ctrlSslStream);
         SetSslInfo(ctrlSslStream);
     }
 
-    private SslStream CreateSSlStream(Stream s, bool leaveInnerStreamOpen)
+    private async Task SwitchCtrlToSSLModeAsync(CancellationToken cancellationToken)
+    {
+        ctrlSslStream = await CreateSslStreamAsync(ctrlClient.GetStream(), leaveInnerStreamOpen: true, cancellationToken).ConfigureAwait(false);
+        BindControlStream(ctrlSslStream);
+        SetSslInfo(ctrlSslStream);
+    }
+
+    private void SwitchCtrlToClearMode()
+    {
+        ctrlSslStream.Close();
+        ctrlSslStream = null;
+        BindControlStream(ctrlClient.GetStream());
+    }
+
+    private SslStream NewSslStream(Stream s, bool leaveInnerStreamOpen, out X509CertificateCollection clientCertificates)
     {
         SslStream sslStream = new SslStream(s, leaveInnerStreamOpen, ValidateServerCertificate, null);
         sslStream.ReadTimeout = timeout;
         sslStream.WriteTimeout = timeout;
-        X509CertificateCollection x509CertificateCollection = new X509CertificateCollection();
+        clientCertificates = new X509CertificateCollection();
         if (sslClientCert != null)
         {
-            x509CertificateCollection.Add(sslClientCert);
+            clientCertificates.Add(sslClientCert);
         }
-        sslStream.AuthenticateAsClient(hostname, x509CertificateCollection, sslProtocols, sslCheckCertRevocation);
+        return sslStream;
+    }
+
+    private SslStream CreateSslStream(Stream s, bool leaveInnerStreamOpen)
+    {
+        SslStream sslStream = NewSslStream(s, leaveInnerStreamOpen, out X509CertificateCollection clientCertificates);
+        sslStream.AuthenticateAsClient(hostname, clientCertificates, sslProtocols, sslCheckCertRevocation);
+        CheckSslAlgorithmsStrength(sslStream);
+        return sslStream;
+    }
+
+    private async Task<SslStream> CreateSslStreamAsync(Stream s, bool leaveInnerStreamOpen, CancellationToken cancellationToken)
+    {
+        SslStream sslStream = NewSslStream(s, leaveInnerStreamOpen, out X509CertificateCollection clientCertificates);
+        // The handshake overload available on netstandard2.0 takes no token; tearing the inner
+        // stream down is the only way to abandon it early.
+        using (CancellationTokenSource scope = TimeoutScope(cancellationToken))
+        using (scope.Token.Register(state => ((Stream)state).Dispose(), s))
+        {
+            try
+            {
+                await sslStream.AuthenticateAsClientAsync(hostname, clientCertificates, sslProtocols, sslCheckCertRevocation).ConfigureAwait(false);
+            }
+            catch (Exception) when (scope.Token.IsCancellationRequested)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                throw new FTPException("Timeout during the TLS handshake");
+            }
+        }
         CheckSslAlgorithmsStrength(sslStream);
         return sslStream;
     }
@@ -110,13 +219,6 @@ public sealed partial class FTPSClient
         {
             throw new FTPSslException("The SSL/TSL hash algorithm strength does not fulfill the requirements: " + sslStream.HashStrength);
         }
-    }
-
-    private void SwitchCtrlToClearMode()
-    {
-        ctrlSslStream.Close();
-        ctrlSslStream = null;
-        SetupCtrlStreamReaderAndWriter(ctrlClient.GetStream());
     }
 
     private bool ValidateServerCertificate(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors sslPolicyErrors)
@@ -155,6 +257,11 @@ public sealed partial class FTPSClient
         return true;
     }
 
+    // ----- command / reply exchange ---------------------------------------------------------------
+
+    // The lock spans a command and its reply. SemaphoreSlim is not re-entrant, so everything that
+    // runs while it is held calls the *Core variants, never HandleCmd/GetReply.
+
     private FTPReply HandleCmd(string command)
     {
         return HandleCmd(command, waitForAnswer: true);
@@ -162,16 +269,70 @@ public sealed partial class FTPSClient
 
     private FTPReply HandleCmd(string command, bool waitForAnswer)
     {
-        lock (ctrlChannelLock)
+        ctrlChannelLock.Wait();
+        try
         {
-            CheckConnection();
-            CheckCommandInjection(command);
-            ctrlSw.WriteLine(command);
-            ctrlSw.Flush();
-            this.LogCommand?.Invoke(this, new LogCommandEventArgs(MaskCredentials(command)));
-            if (!waitForAnswer) return null;
-            return GetReply();
+            return HandleCmdCore(command, waitForAnswer);
         }
+        finally
+        {
+            ctrlChannelLock.Release();
+        }
+    }
+
+    private Task<FTPReply> HandleCmdAsync(string command, CancellationToken cancellationToken)
+    {
+        return HandleCmdAsync(command, waitForAnswer: true, cancellationToken);
+    }
+
+    private async Task<FTPReply> HandleCmdAsync(string command, bool waitForAnswer, CancellationToken cancellationToken)
+    {
+        await ctrlChannelLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await HandleCmdCoreAsync(command, waitForAnswer, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            ctrlChannelLock.Release();
+        }
+    }
+
+    private FTPReply HandleCmdCore(string command, bool waitForAnswer)
+    {
+        byte[] bytes = PrepareCommand(command);
+        ctrlStream.Write(bytes, 0, bytes.Length);
+        ctrlStream.Flush();
+        this.LogCommand?.Invoke(this, new LogCommandEventArgs(MaskCredentials(command)));
+        if (!waitForAnswer) return null;
+        return GetReplyCore();
+    }
+
+    private async Task<FTPReply> HandleCmdCoreAsync(string command, bool waitForAnswer, CancellationToken cancellationToken)
+    {
+        byte[] bytes = PrepareCommand(command);
+        using (CancellationTokenSource scope = TimeoutScope(cancellationToken))
+        {
+            try
+            {
+                await ctrlStream.WriteAsync(bytes, 0, bytes.Length, scope.Token).ConfigureAwait(false);
+                await ctrlStream.FlushAsync(scope.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new FTPException("Timeout sending the command to the server");
+            }
+        }
+        this.LogCommand?.Invoke(this, new LogCommandEventArgs(MaskCredentials(command)));
+        if (!waitForAnswer) return null;
+        return await GetReplyCoreAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private byte[] PrepareCommand(string command)
+    {
+        CheckConnection();
+        CheckCommandInjection(command);
+        return controlEncoding.GetBytes(command + "\r\n");
     }
 
     internal static string MaskCredentials(string command)
@@ -200,9 +361,27 @@ public sealed partial class FTPSClient
 
     private FTPReply GetReply()
     {
-        lock (ctrlChannelLock)
+        ctrlChannelLock.Wait();
+        try
         {
             return GetReplyCore();
+        }
+        finally
+        {
+            ctrlChannelLock.Release();
+        }
+    }
+
+    private async Task<FTPReply> GetReplyAsync(CancellationToken cancellationToken)
+    {
+        await ctrlChannelLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await GetReplyCoreAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            ctrlChannelLock.Release();
         }
     }
 
@@ -210,54 +389,96 @@ public sealed partial class FTPSClient
     {
         try
         {
-            FTPReply fTPReply = new FTPReply();
-            bool flag = false;
+            ReplyAccumulator reply = new ReplyAccumulator();
             do
             {
-                string text = ctrlSr.ReadLine();
-                if (text == null)
-                {
-                    throw new FTPException("The server closed the control connection");
-                }
-                Match match = Regex.Match(text, "^([0-9]{3})([\\s\\-])(.*)$");
-                if (match.Success)
-                {
-                    int num = int.Parse(match.Groups[1].Value);
-                    string value = match.Groups[3].Value;
-                    flag = match.Groups[2].Value == " ";
-                    if (fTPReply.Code == 0)
-                    {
-                        fTPReply.Code = num;
-                        fTPReply.Message = value;
-                        continue;
-                    }
-                    if (fTPReply.Code != num)
-                    {
-                        throw new FTPReplyParseException(text);
-                    }
-                    fTPReply.Message = fTPReply.Message + "\r\n" + value;
-                }
-                else
-                {
-                    if (fTPReply.Code == 0)
-                    {
-                        throw new FTPReplyParseException(text);
-                    }
-                    fTPReply.Message = fTPReply.Message + "\r\n" + text.TrimStart(Array.Empty<char>());
-                }
-            } while (!flag);
-            waitingCompletionReply = fTPReply.Code < 200;
-            this.LogServerReply?.Invoke(this, new LogServerReplyEventArgs(fTPReply));
-            if (fTPReply.Code >= 400)
-            {
-                throw new FTPCommandException(fTPReply);
-            }
-            return fTPReply;
+                string line = ctrlReader.ReadLine();
+                if (line == null) throw new FTPException("The server closed the control connection");
+                reply.Add(line);
+            } while (!reply.IsComplete);
+            return FinishReply(reply.Reply);
         }
         catch (Exception)
         {
             waitingCompletionReply = false;
             throw;
+        }
+    }
+
+    private async Task<FTPReply> GetReplyCoreAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            ReplyAccumulator reply = new ReplyAccumulator();
+            using (CancellationTokenSource scope = TimeoutScope(cancellationToken))
+            {
+                do
+                {
+                    string line;
+                    try
+                    {
+                        line = await ctrlReader.ReadLineAsync(scope.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        throw new FTPException("Timeout waiting for the server reply");
+                    }
+                    if (line == null) throw new FTPException("The server closed the control connection");
+                    reply.Add(line);
+                } while (!reply.IsComplete);
+            }
+            return FinishReply(reply.Reply);
+        }
+        catch (Exception)
+        {
+            waitingCompletionReply = false;
+            throw;
+        }
+    }
+
+    private FTPReply FinishReply(FTPReply reply)
+    {
+        waitingCompletionReply = reply.Code < 200;
+        this.LogServerReply?.Invoke(this, new LogServerReplyEventArgs(reply));
+        if (reply.Code >= 400)
+        {
+            throw new FTPCommandException(reply);
+        }
+        return reply;
+    }
+
+    /// <summary>Assembles a possibly multi-line reply (RFC 959 §4.2) one line at a time.</summary>
+    private sealed class ReplyAccumulator
+    {
+        public FTPReply Reply { get; } = new FTPReply();
+        public bool IsComplete { get; private set; }
+
+        public void Add(string line)
+        {
+            Match match = replyLinePattern.Match(line);
+            if (match.Success)
+            {
+                int code = int.Parse(match.Groups[1].Value);
+                string text = match.Groups[3].Value;
+                IsComplete = match.Groups[2].Value == " ";
+                if (Reply.Code == 0)
+                {
+                    Reply.Code = code;
+                    Reply.Message = text;
+                    return;
+                }
+                if (Reply.Code != code)
+                {
+                    throw new FTPReplyParseException(line);
+                }
+                Reply.Message = Reply.Message + "\r\n" + text;
+                return;
+            }
+            if (Reply.Code == 0)
+            {
+                throw new FTPReplyParseException(line);
+            }
+            Reply.Message = Reply.Message + "\r\n" + line.TrimStart(Array.Empty<char>());
         }
     }
 
@@ -267,7 +488,7 @@ public sealed partial class FTPSClient
         {
             try
             {
-                QuitCmd(waitForAnswer: false);
+                HandleCmd(Cmd.Quit, waitForAnswer: false);
             }
             catch (Exception) { }
             if (ctrlSslStream != null)
@@ -275,10 +496,8 @@ public sealed partial class FTPSClient
                 ctrlSslStream.Close();
                 ctrlSslStream = null;
             }
-            ctrlSr.Close();
-            ctrlSr = null;
-            ctrlSw.Close();
-            ctrlSw = null;
+            ctrlReader = null;
+            ctrlStream = null;
             ctrlClient.Close();
             ctrlClient = null;
             waitingCompletionReply = false;

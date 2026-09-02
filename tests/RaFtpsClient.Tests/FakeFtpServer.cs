@@ -51,6 +51,8 @@ internal sealed class FakeFtpServer : IDisposable
     public bool SuppressPreliminaryReply { get; set; }
     /// <summary>Drop the control connection instead of answering this command.</summary>
     public string DropConnectionOn { get; set; }
+    /// <summary>Never answer this command, leaving the client waiting for a reply.</summary>
+    public string HangOn { get; set; }
 
     public FakeTlsMode TlsMode { get; set; } = FakeTlsMode.None;
     /// <summary>Certificate presented to the client; defaults to the shared self-signed one.</summary>
@@ -64,6 +66,8 @@ internal sealed class FakeFtpServer : IDisposable
     public bool RejectProt { get; set; }
     /// <summary>True once a data connection has actually completed a TLS handshake.</summary>
     public bool DataChannelWasEncrypted { get; private set; }
+    /// <summary>Transfers the client tore down before the payload was complete.</summary>
+    public int AbortedTransfers { get; private set; }
 
     public FakeFtpServer(bool useIPv6 = false)
     {
@@ -142,6 +146,10 @@ internal sealed class FakeFtpServer : IDisposable
                     {
                         return;
                     }
+                    if (HangOn != null && verb.Equals(HangOn, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
                     if (ErrorReplies.TryGetValue(verb, out string error))
                     {
                         writer.WriteLine(error);
@@ -199,7 +207,12 @@ internal sealed class FakeFtpServer : IDisposable
                         case "CLNT":
                         case "NOOP":
                         case "MODE":
+                        case "LANG":
                             writer.WriteLine("200 " + verb + " command successful.");
+                            break;
+                        case "CDUP":
+                            CurrentDirectory = CurrentDirectory.Substring(0, Math.Max(1, CurrentDirectory.TrimEnd('/').LastIndexOf('/')));
+                            writer.WriteLine("250 CDUP command successful.");
                             break;
                         case "SYST":
                             writer.WriteLine("215 UNIX Type: L8");
@@ -304,14 +317,26 @@ internal sealed class FakeFtpServer : IDisposable
             return;
         }
         if (!SuppressPreliminaryReply) writer.WriteLine("150 Opening data connection.");
-        using (TcpClient data = dataListener.AcceptTcpClient())
-        using (Stream ds = AcceptDataStream(data, dataProtected))
+        bool aborted = false;
+        try
         {
-            ds.Write(payload, 0, payload.Length);
-            ds.Flush();
+            using (TcpClient data = dataListener.AcceptTcpClient())
+            using (Stream ds = AcceptDataStream(data, dataProtected))
+            {
+                // Written in slices so a client that closes mid-transfer is noticed as a failed
+                // write, the way a real server sees an aborted download.
+                for (int offset = 0; offset < payload.Length; offset += 16384)
+                {
+                    ds.Write(payload, offset, Math.Min(16384, payload.Length - offset));
+                }
+                ds.Flush();
+            }
         }
+        catch (IOException) { aborted = true; }
+        catch (ObjectDisposedException) { aborted = true; }
         dataListener.Stop();
-        writer.WriteLine("226 Transfer complete.");
+        if (aborted) AbortedTransfers++;
+        writer.WriteLine(aborted ? "426 Connection closed; transfer aborted." : "226 Transfer complete.");
     }
 
     private void TransferIn(StreamWriter writer, TcpListener dataListener, string preliminaryReply,
@@ -323,17 +348,23 @@ internal sealed class FakeFtpServer : IDisposable
             return;
         }
         if (!SuppressPreliminaryReply) writer.WriteLine(preliminaryReply);
+        bool aborted = false;
         using (var received = new MemoryStream())
         {
-            using (TcpClient data = dataListener.AcceptTcpClient())
-            using (Stream ds = AcceptDataStream(data, dataProtected))
+            try
             {
-                ds.CopyTo(received);
+                using (TcpClient data = dataListener.AcceptTcpClient())
+                using (Stream ds = AcceptDataStream(data, dataProtected))
+                {
+                    ds.CopyTo(received);
+                }
             }
+            catch (IOException) { aborted = true; }
             LastUpload = received.ToArray();
         }
         dataListener.Stop();
-        writer.WriteLine("226 Transfer complete.");
+        if (aborted) AbortedTransfers++;
+        writer.WriteLine(aborted ? "426 Connection closed; transfer aborted." : "226 Transfer complete.");
     }
 
     public void Dispose()

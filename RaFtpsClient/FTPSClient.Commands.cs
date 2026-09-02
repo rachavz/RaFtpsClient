@@ -1,21 +1,56 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.IO;
-using System.Net;
-using System.Net.Sockets;
-using System.Net.Security;
-using System.Security.Authentication;
-using System.Security.Cryptography.X509Certificates;
-using System.Text;
-using System.Text.RegularExpressions;
-using System.Threading;
 
 namespace RaFtpsClient;
 
-// One method per FTP verb, plus the parsers for their replies.
+// The FTP vocabulary: how each verb is spelled and how its reply is read. Everything here is pure,
+// which is what lets the synchronous and asynchronous paths share it instead of each carrying a
+// set of one-line wrappers.
 public sealed partial class FTPSClient
 {
+    private static class Cmd
+    {
+        public const string Cdup = "CDUP";
+        public const string Syst = "SYST";
+        public const string Pwd = "PWD";
+        public const string Quit = "QUIT";
+        public const string Noop = "NOOP";
+        public const string Stou = "STOU";
+        public const string Ccc = "CCC";
+        public const string Feat = "FEAT";
+        public const string Pasv = "PASV";
+        public const string Epsv = "EPSV";
+
+        public static string Stor(string fileName) => "STOR " + fileName;
+        public static string Appe(string fileName) => "APPE " + fileName;
+        public static string Retr(string fileName) => "RETR " + fileName;
+        public static string Dele(string fileName) => "DELE " + fileName;
+        public static string Mkd(string dirName) => "MKD " + dirName;
+        public static string Rmd(string dirName) => "RMD " + dirName;
+        public static string Cwd(string dirName) => "CWD " + dirName;
+        public static string Rnfr(string fileName) => "RNFR " + fileName;
+        public static string Rnto(string fileName) => "RNTO " + fileName;
+        public static string User(string userName) => "USER " + userName;
+        public static string Pass(string password) => "PASS " + password;
+        public static string Type(ERepType repType) => "TYPE " + repType;
+        public static string Auth(EAuthMechanism mechanism) => "AUTH " + mechanism;
+        public static string Prot(EProtCode protCode) => "PROT " + protCode;
+        public static string Pbsz(uint maxSize) => "PBSZ " + maxSize;
+        public static string Opts(string option) => "OPTS " + option;
+        public static string Mdtm(string fileName) => "MDTM " + fileName;
+        public static string Size(string fileName) => "SIZE " + fileName;
+        public static string Clnt(string name) => "CLNT " + name;
+        public static string List(string dirName) => WithOptionalArgument("LIST", dirName);
+        public static string Nlst(string dirName) => WithOptionalArgument("NLST", dirName);
+        public static string Lang(string ietfLanguageTag) => WithOptionalArgument("LANG", ietfLanguageTag);
+
+        private static string WithOptionalArgument(string verb, string argument)
+        {
+            return (argument != null) ? verb + " " + argument : verb;
+        }
+    }
+
     internal static string ParsePwdReply(FTPReply reply)
     {
         int num = reply.Message.IndexOf('"');
@@ -25,14 +60,6 @@ public sealed partial class FTPSClient
         return reply.Message.Substring(num + 1, num2 - num - 1);
     }
 
-    private void StorCmd(string fileName) { HandleCmd("STOR " + fileName); }
-
-    private void StouCmd(out string fileName)
-    {
-        FTPReply reply = HandleCmd("STOU");
-        fileName = ParseStouReply(reply);
-    }
-
     internal static string ParseStouReply(FTPReply reply)
     {
         int num = reply.Message.LastIndexOf(' ');
@@ -40,70 +67,15 @@ public sealed partial class FTPSClient
         return reply.Message.Substring(num + 1);
     }
 
-    private void AppeCmd(string fileName) { HandleCmd("APPE " + fileName); }
-
-    private void RetrCmd(string fileName) { HandleCmd("RETR " + fileName); }
-
-    private void DeleCmd(string fileName) { HandleCmd("DELE " + fileName); }
-
-    private void MkdCmd(string dirName) { HandleCmd("MKD " + dirName); }
-
-    private void RmdCmd(string dirName) { HandleCmd("RMD " + dirName); }
-
-    private void CdupCmd() { HandleCmd("CDUP"); }
-
-    private string SystCmd() { return HandleCmd("SYST").Message; }
-
-    private void TypeCmd(ERepType repType, string param2)
-    {
-        HandleCmd("TYPE " + repType.ToString() + ((param2 != null) ? (" " + param2) : ""));
-    }
-
-    private string PwdCmd() { return ParsePwdReply(HandleCmd("PWD")); }
-
-    private void CwdCmd(string dirName) { HandleCmd("CWD " + dirName); }
-
     // 230 (already logged in) and 232 (authorised by security data exchange) both mean no PASS is due.
-    private bool UserCmd(string userName, out string message)
+    private static bool PasswordRequired(FTPReply userReply)
     {
-        FTPReply reply = HandleCmd("USER " + userName);
-        message = reply.Message;
-        return reply.Code != 230 && reply.Code != 232;
+        return userReply.Code != 230 && userReply.Code != 232;
     }
 
-    private string PassCmd(string password) { return HandleCmd("PASS " + password).Message; }
-
-    private void ListCmd(string dirName) { HandleCmd("LIST" + ((dirName != null) ? (" " + dirName) : "")); }
-
-    private void NlstCmd(string dirName) { HandleCmd("NLST" + ((dirName != null) ? (" " + dirName) : "")); }
-
-    private void RnfrCmd(string fileOldName) { HandleCmd("RNFR " + fileOldName); }
-
-    private void RntoCmd(string fileNewName) { HandleCmd("RNTO " + fileNewName); }
-
-    private void QuitCmd(bool waitForAnswer) { HandleCmd("QUIT", waitForAnswer); }
-
-    private void NoopCmd() { HandleCmd("NOOP"); }
-
-    private void AuthCmd(EAuthMechanism authMech)
+    private static IList<string> ParseFeatReply(FTPReply reply)
     {
-        HandleCmd("AUTH " + authMech);
-        SwitchCtrlToSSLMode();
-    }
-
-    private void CccCmd()
-    {
-        HandleCmd("CCC");
-        SwitchCtrlToClearMode();
-    }
-
-    private void ProtCmd(EProtCode protCode) { HandleCmd("PROT " + protCode); }
-
-    private void PbszCmd(uint maxSize) { HandleCmd("PBSZ " + maxSize); }
-
-    private IList<string> FeatCmd()
-    {
-        List<string> list = new List<string>(HandleCmd("FEAT").Message.Split(new char[2] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries));
+        List<string> list = new List<string>(reply.Message.Split(new char[2] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries));
         // The reply is bracketed by an introductory line and a closing "End" line, neither of which
         // is a feature; a server that answers with anything shorter advertises nothing.
         if (list.Count < 3) return new List<string>();
@@ -116,18 +88,13 @@ public sealed partial class FTPSClient
         return list;
     }
 
-    private void OptsCmd(string command) { HandleCmd("OPTS " + command); }
-
-    private void LangCmd(string ietfLanguageTag) { HandleCmd("LANG" + ((ietfLanguageTag != null) ? (" " + ietfLanguageTag) : "")); }
-
-    private DateTime MdtmCmd(string fileName) { return ParseFTPDateTime(HandleCmd("MDTM " + fileName).Message); }
-
-    private ulong SizeCmd(string fileName) { return ulong.Parse(HandleCmd("SIZE " + fileName).Message); }
+    private static ulong ParseSizeReply(FTPReply reply)
+    {
+        return ulong.Parse(reply.Message.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture);
+    }
 
     internal static DateTime ParseFTPDateTime(string message)
     {
         return DateTime.ParseExact(message, "yyyyMMddHHmmss.FFF", CultureInfo.GetCultureInfo("en-US"), DateTimeStyles.AssumeUniversal);
     }
-
-    private void ClntCmd(string name) { HandleCmd("CLNT " + name); }
 }
