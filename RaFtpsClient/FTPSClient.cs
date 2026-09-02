@@ -56,6 +56,8 @@ public sealed partial class FTPSClient : IDisposable
     private const string anonPassword = "anonymous@FTPSClient.org";
     private const string clntName = "AlexFTPS";
     private const int transferBufferSize = 81920;
+    // Listings are small; a transfer-sized buffer pair (80 KB bytes + 160 KB chars) per LIST is waste.
+    private const int listingBufferSize = 8192;
     private const ESSLSupportMode defaultSSLSupportMode = (ESSLSupportMode)11;
     private ESSLSupportMode sslSupportRequestedMode;
     private ESSLSupportMode sslSupportCurrentMode;
@@ -158,7 +160,6 @@ public sealed partial class FTPSClient : IDisposable
     }
 
     private bool IsControlChannelEncrypted => ctrlSslStream != null;
-    private bool IsDataChannelOpen => dataClient != null;
 
     // The control channel is off limits to the keep-alive thread from the moment a data connection
     // is being set up until the transfer's completion reply has been read.

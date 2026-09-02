@@ -80,7 +80,7 @@ public sealed partial class FTPSClient
     {
         try
         {
-            return ReadStreamAsUtf8(GetDataStream(), transferBufferSize);
+            return ReadStreamAsUtf8(GetDataStream(), listingBufferSize);
         }
         finally
         {
@@ -93,7 +93,7 @@ public sealed partial class FTPSClient
         try
         {
             Stream dataStream = await GetDataStreamAsync(cancellationToken).ConfigureAwait(false);
-            return await ReadStreamAsUtf8Async(dataStream, transferBufferSize, timeout, cancellationToken).ConfigureAwait(false);
+            return await ReadStreamAsUtf8Async(dataStream, listingBufferSize, timeout, cancellationToken).ConfigureAwait(false);
         }
         finally
         {

@@ -96,11 +96,16 @@ public class ReplyParsingTests
     [Fact]
     public void DisambiguatesLocalPathsThatCollide()
     {
-        var seen = new List<string>();
+        var paths = new LocalPathAllocator();
 
-        Assert.Equal("/tmp/a.txt", FTPSClient.GetUniquePath(seen, "/tmp/a.txt"));
-        Assert.Equal("/tmp/a.txt_1", FTPSClient.GetUniquePath(seen, "/tmp/a.txt"));
-        Assert.Equal("/tmp/a.txt_2", FTPSClient.GetUniquePath(seen, "/tmp/a.txt"));
-        Assert.Equal("/tmp/b.txt", FTPSClient.GetUniquePath(seen, "/tmp/b.txt"));
+        Assert.Equal("/tmp/a.txt", paths.Reserve("/tmp/a.txt"));
+        Assert.Equal("/tmp/a.txt_1", paths.Reserve("/tmp/a.txt"));
+        Assert.Equal("/tmp/a.txt_2", paths.Reserve("/tmp/a.txt"));
+        Assert.Equal("/tmp/b.txt", paths.Reserve("/tmp/b.txt"));
+        // Case-insensitive, and a suffixed name that already exists is skipped over.
+        Assert.Equal("/tmp/A.TXT_3", paths.Reserve("/tmp/A.TXT"));
+        Assert.Equal("/tmp/c.txt_1", paths.Reserve("/tmp/c.txt_1"));
+        Assert.Equal("/tmp/c.txt", paths.Reserve("/tmp/c.txt"));
+        Assert.Equal("/tmp/c.txt_2", paths.Reserve("/tmp/c.txt"));
     }
 }

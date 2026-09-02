@@ -217,10 +217,12 @@ public class FTPSClientTests : IDisposable
         Assert.Equal(ETransferActions.FileDownloaded, actions[actions.Count - 1]);
     }
 
+    // 4 MB so the server is still writing when the client tears the data connection down and answers
+    // with a 426, which must not replace the cancellation the caller is expecting.
     [Fact]
     public void CancellingFromTheCallbackAbortsTheDownload()
     {
-        server.FileContent = new byte[500_000];
+        server.FileContent = new byte[4_000_000];
         string local = TempFile();
 
         Connect();
@@ -230,6 +232,8 @@ public class FTPSClientTests : IDisposable
             {
                 cancel = true;
             }));
+        Assert.Equal("/home/user", client.GetCurrentDirectory());
+        Assert.Equal(1, server.AbortedTransfers);
     }
 
     [Fact]

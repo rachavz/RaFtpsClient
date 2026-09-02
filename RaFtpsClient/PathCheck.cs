@@ -1,5 +1,4 @@
 using System.IO;
-using System.Text;
 
 namespace RaFtpsClient;
 
@@ -8,7 +7,9 @@ namespace RaFtpsClient;
 /// </summary>
 public static class PathCheck
 {
-    private static char replacementChar = '_';
+    private const char replacementChar = '_';
+    // Path.GetInvalidFileNameChars allocates a fresh array on every call.
+    private static readonly char[] invalidFileNameChars = Path.GetInvalidFileNameChars();
 
     /// <summary>
     /// Replaces invalid file name characters with underscores.
@@ -17,16 +18,19 @@ public static class PathCheck
     /// <returns>A valid local file name.</returns>
     public static string GetValidLocalFileName(string fileName)
     {
-        return ReplaceAllChars(fileName, Path.GetInvalidFileNameChars(), replacementChar);
-    }
-
-    private static string ReplaceAllChars(string str, char[] oldChars, char newChar)
-    {
-        StringBuilder stringBuilder = new StringBuilder(str);
-        foreach (char oldChar in oldChars)
+        int first = fileName.IndexOfAny(invalidFileNameChars);
+        if (first < 0)
         {
-            stringBuilder.Replace(oldChar, newChar);
+            return fileName;
         }
-        return stringBuilder.ToString();
+        char[] chars = fileName.ToCharArray();
+        for (int i = first; i < chars.Length; i++)
+        {
+            if (System.Array.IndexOf(invalidFileNameChars, chars[i]) >= 0)
+            {
+                chars[i] = replacementChar;
+            }
+        }
+        return new string(chars);
     }
 }

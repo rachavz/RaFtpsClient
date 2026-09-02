@@ -39,6 +39,9 @@ Behaviour changes:
 - KeepAliveTimeout is configurable.
 
 Fixes:
+- A recursive download with many identically named files could take minutes deduplicating
+  local paths; it is now linear.
+- The listing parser is twice as fast and allocates half as much.
 - Connect overload ignored useCtrlEndPointAddressForData.
 - Keep-alive could not be restarted, and could consume a transfer's completion reply.
 - Command injection through a bare CR or LF in a remote name.
@@ -60,6 +63,7 @@ Fixes:
   <ItemGroup>
     <!-- The reply parsers and the listing parser are internal; the test project drives them directly. -->
     <InternalsVisibleTo Include="RaFtpsClient.Tests" />
+    <InternalsVisibleTo Include="RaFtpsClient.Benchmarks" />
   </ItemGroup>
 
 </Project>

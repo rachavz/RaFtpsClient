@@ -11,13 +11,13 @@ public class FTPException : Exception
     protected FTPException() { }
 
     /// <summary>Initializes a new instance with a message.</summary>
-    /// <param name="Message">The error message.</param>
-    public FTPException(string Message) : base(Message) { }
+    /// <param name="message">The error message.</param>
+    public FTPException(string message) : base(message) { }
 
     /// <summary>Initializes a new instance with a message and inner exception.</summary>
-    /// <param name="Message">The error message.</param>
+    /// <param name="message">The error message.</param>
     /// <param name="innerException">The inner exception.</param>
-    public FTPException(string Message, Exception innerException) : base(Message, innerException) { }
+    public FTPException(string message, Exception innerException) : base(message, innerException) { }
 }
 
 /// <summary>
@@ -26,15 +26,13 @@ public class FTPException : Exception
 public class FTPReplyParseException : FTPException
 {
     /// <summary>Gets the raw reply text that could not be parsed.</summary>
-    public string ReplyText => replyText;
-
-    private string replyText;
+    public string ReplyText { get; }
 
     /// <summary>Initializes a new instance with the raw reply text.</summary>
     /// <param name="replyText">The raw reply text.</param>
     public FTPReplyParseException(string replyText) : base("Invalid server reply: " + replyText)
     {
-        this.replyText = replyText;
+        ReplyText = replyText;
     }
 }
 
@@ -44,15 +42,13 @@ public class FTPReplyParseException : FTPException
 public class FTPProtocolException : FTPException
 {
     /// <summary>Gets the FTP reply that caused the exception.</summary>
-    public FTPReply Reply => reply;
-
-    private FTPReply reply;
+    public FTPReply Reply { get; }
 
     /// <summary>Initializes a new instance with the invalid reply.</summary>
     /// <param name="reply">The invalid FTP reply.</param>
-    public FTPProtocolException(FTPReply reply) : base("Invalid FTP protocol reply: " + reply.ToString())
+    public FTPProtocolException(FTPReply reply) : base("Invalid FTP protocol reply: " + reply)
     {
-        this.reply = reply;
+        Reply = reply;
     }
 }
 
@@ -62,8 +58,8 @@ public class FTPProtocolException : FTPException
 public class FTPOperationCancelledException : FTPException
 {
     /// <summary>Initializes a new instance with a message.</summary>
-    /// <param name="Message">The error message.</param>
-    public FTPOperationCancelledException(string Message) : base(Message) { }
+    /// <param name="message">The error message.</param>
+    public FTPOperationCancelledException(string message) : base(message) { }
 }
 
 /// <summary>
@@ -71,25 +67,23 @@ public class FTPOperationCancelledException : FTPException
 /// </summary>
 public class FTPCommandException : FTPException
 {
-    private int errorCode;
-
     /// <summary>Gets the FTP error code returned by the server.</summary>
-    public int ErrorCode => errorCode;
+    public int ErrorCode { get; }
 
     /// <summary>Initializes a new instance with a message.</summary>
-    /// <param name="Message">The error message.</param>
-    public FTPCommandException(string Message) : base(Message) { }
+    /// <param name="message">The error message.</param>
+    public FTPCommandException(string message) : base(message) { }
 
     /// <summary>Initializes a new instance with a message and inner exception.</summary>
-    /// <param name="Message">The error message.</param>
+    /// <param name="message">The error message.</param>
     /// <param name="innerException">The inner exception.</param>
-    public FTPCommandException(string Message, Exception innerException) : base(Message, innerException) { }
+    public FTPCommandException(string message, Exception innerException) : base(message, innerException) { }
 
     /// <summary>Initializes a new instance from an FTP error reply.</summary>
     /// <param name="reply">The FTP reply containing the error.</param>
     public FTPCommandException(FTPReply reply) : base(reply.Message)
     {
-        errorCode = reply.Code;
+        ErrorCode = reply.Code;
     }
 }
 
@@ -99,11 +93,11 @@ public class FTPCommandException : FTPException
 public class FTPSslException : FTPException
 {
     /// <summary>Initializes a new instance with a message.</summary>
-    /// <param name="Message">The error message.</param>
-    public FTPSslException(string Message) : base(Message) { }
+    /// <param name="message">The error message.</param>
+    public FTPSslException(string message) : base(message) { }
 
     /// <summary>Initializes a new instance with a message and inner exception.</summary>
-    /// <param name="Message">The error message.</param>
+    /// <param name="message">The error message.</param>
     /// <param name="innerException">The inner exception.</param>
-    public FTPSslException(string Message, Exception innerException) : base(Message, innerException) { }
+    public FTPSslException(string message, Exception innerException) : base(message, innerException) { }
 }

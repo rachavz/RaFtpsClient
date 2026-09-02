@@ -41,12 +41,14 @@ public sealed partial class FTPSClient
     public ulong GetFile(string remoteFileName, string localFileName, FileTransferCallback transferCallback)
     {
         ulong? fileTransferSize = (transferCallback != null) ? QuerySizeForProgress(remoteFileName) : null;
-        ulong total;
-        using (Stream stream = GetFile(remoteFileName))
-        using (FileStream fileStream = OpenForWrite(localFileName, useAsync: false))
+        FTPStream stream = GetFile(remoteFileName);
+        ulong total = RunTransfer(stream, () =>
         {
-            total = CopyWithProgress(stream, fileStream, ETransferActions.FileDownloadingStatus, localFileName, remoteFileName, fileTransferSize, transferCallback);
-        }
+            using (FileStream fileStream = OpenForWrite(localFileName, useAsync: false))
+            {
+                return CopyWithProgress(stream, fileStream, ETransferActions.FileDownloadingStatus, localFileName, remoteFileName, fileTransferSize, transferCallback);
+            }
+        });
         CallTransferCallback(transferCallback, ETransferActions.FileDownloaded, localFileName, remoteFileName, total, fileTransferSize);
         return total;
     }
@@ -118,7 +120,7 @@ public sealed partial class FTPSClient
     /// <param name="transferCallback">Progress callback, or null.</param>
     public void GetFiles(string remoteDirectoryName, string localDirectoryName, string filePattern, EPatternStyle patternStyle, bool recursive, FileTransferCallback transferCallback)
     {
-        GetFiles(remoteDirectoryName, localDirectoryName, filePattern, patternStyle, recursive, transferCallback, new List<string>(), new HashSet<string>());
+        GetFiles(remoteDirectoryName, localDirectoryName, filePattern, patternStyle, recursive, transferCallback, new LocalPathAllocator(), new HashSet<string>());
     }
 
     /// <summary>Downloads multiple files from a remote directory, asynchronously.</summary>
@@ -131,10 +133,10 @@ public sealed partial class FTPSClient
     /// <param name="cancellationToken">Cancels the operation.</param>
     public Task GetFilesAsync(string remoteDirectoryName, string localDirectoryName, string filePattern = null, EPatternStyle patternStyle = EPatternStyle.Verbatim, bool recursive = false, FileTransferCallback transferCallback = null, CancellationToken cancellationToken = default)
     {
-        return GetFilesAsync(remoteDirectoryName, localDirectoryName, filePattern, patternStyle, recursive, transferCallback, new List<string>(), new HashSet<string>(), cancellationToken);
+        return GetFilesAsync(remoteDirectoryName, localDirectoryName, filePattern, patternStyle, recursive, transferCallback, new LocalPathAllocator(), new HashSet<string>(), cancellationToken);
     }
 
-    private void GetFiles(string remoteDirectoryName, string localDirectoryName, string filePattern, EPatternStyle patternStyle, bool recursive, FileTransferCallback transferCallback, IList<string> paths, ISet<string> visitedRemoteDirs)
+    private void GetFiles(string remoteDirectoryName, string localDirectoryName, string filePattern, EPatternStyle patternStyle, bool recursive, FileTransferCallback transferCallback, LocalPathAllocator paths, ISet<string> visitedRemoteDirs)
     {
         Regex regex = PatternFor(filePattern, patternStyle);
         string localDir = ResolveLocalDirectory(localDirectoryName, transferCallback);
@@ -146,7 +148,7 @@ public sealed partial class FTPSClient
         {
             if (!item.IsDirectory && (regex == null || regex.IsMatch(item.Name)))
             {
-                string uniquePath = GetUniquePath(paths, Path.Combine(localDir, PathCheck.GetValidLocalFileName(item.Name)));
+                string uniquePath = paths.Reserve(Path.Combine(localDir, PathCheck.GetValidLocalFileName(item.Name)));
                 GetFile(CombineRemotePath(remoteDir, item.Name), uniquePath, transferCallback);
             }
         }
@@ -156,12 +158,12 @@ public sealed partial class FTPSClient
             if (!item.IsDirectory) continue;
             string childRemoteDir = ChildDirectoryPath(remoteDir, item);
             if (visitedRemoteDirs.Contains(childRemoteDir)) continue;
-            string uniquePath = GetUniquePath(paths, Path.Combine(localDir, PathCheck.GetValidLocalFileName(item.Name)));
+            string uniquePath = paths.Reserve(Path.Combine(localDir, PathCheck.GetValidLocalFileName(item.Name)));
             GetFiles(childRemoteDir, uniquePath, filePattern, patternStyle, recursive, transferCallback, paths, visitedRemoteDirs);
         }
     }
 
-    private async Task GetFilesAsync(string remoteDirectoryName, string localDirectoryName, string filePattern, EPatternStyle patternStyle, bool recursive, FileTransferCallback transferCallback, IList<string> paths, ISet<string> visitedRemoteDirs, CancellationToken cancellationToken)
+    private async Task GetFilesAsync(string remoteDirectoryName, string localDirectoryName, string filePattern, EPatternStyle patternStyle, bool recursive, FileTransferCallback transferCallback, LocalPathAllocator paths, ISet<string> visitedRemoteDirs, CancellationToken cancellationToken)
     {
         Regex regex = PatternFor(filePattern, patternStyle);
         string localDir = ResolveLocalDirectory(localDirectoryName, transferCallback);
@@ -173,7 +175,7 @@ public sealed partial class FTPSClient
         {
             if (!item.IsDirectory && (regex == null || regex.IsMatch(item.Name)))
             {
-                string uniquePath = GetUniquePath(paths, Path.Combine(localDir, PathCheck.GetValidLocalFileName(item.Name)));
+                string uniquePath = paths.Reserve(Path.Combine(localDir, PathCheck.GetValidLocalFileName(item.Name)));
                 await GetFileAsync(CombineRemotePath(remoteDir, item.Name), uniquePath, transferCallback, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -183,7 +185,7 @@ public sealed partial class FTPSClient
             if (!item.IsDirectory) continue;
             string childRemoteDir = ChildDirectoryPath(remoteDir, item);
             if (visitedRemoteDirs.Contains(childRemoteDir)) continue;
-            string uniquePath = GetUniquePath(paths, Path.Combine(localDir, PathCheck.GetValidLocalFileName(item.Name)));
+            string uniquePath = paths.Reserve(Path.Combine(localDir, PathCheck.GetValidLocalFileName(item.Name)));
             await GetFilesAsync(childRemoteDir, uniquePath, filePattern, patternStyle, recursive, transferCallback, paths, visitedRemoteDirs, cancellationToken).ConfigureAwait(false);
         }
     }
@@ -212,18 +214,6 @@ public sealed partial class FTPSClient
     private static Regex PatternFor(string filePattern, EPatternStyle patternStyle)
     {
         return (filePattern != null) ? new Regex(GetRegexPattern(filePattern, patternStyle)) : null;
-    }
-
-    internal static string GetUniquePath(IList<string> paths, string localFilePath)
-    {
-        string text = localFilePath;
-        int num = 1;
-        while (paths.Contains(text.ToLowerInvariant()))
-        {
-            text = localFilePath + "_" + num++;
-        }
-        paths.Add(text.ToLowerInvariant());
-        return text;
     }
 
     /// <summary>Downloads files from the current remote directory.</summary>
@@ -279,8 +269,7 @@ public sealed partial class FTPSClient
     /// <returns>The number of bytes uploaded.</returns>
     public ulong PutFile(string localFileName, string remoteFileName, FileTransferCallback transferCallback)
     {
-        using Stream s = PutFile(remoteFileName);
-        return SendFile(localFileName, remoteFileName, s, transferCallback);
+        return SendFile(localFileName, remoteFileName, PutFile(remoteFileName), transferCallback);
     }
 
     /// <summary>Uploads a local file to the server, asynchronously.</summary>
@@ -316,8 +305,7 @@ public sealed partial class FTPSClient
     /// <summary>Appends a local file to a remote file with progress callback.</summary>
     public ulong AppendFile(string localFileName, string remoteFileName, FileTransferCallback transferCallback)
     {
-        using Stream s = AppendFile(remoteFileName);
-        return SendFile(localFileName, remoteFileName, s, transferCallback);
+        return SendFile(localFileName, remoteFileName, AppendFile(remoteFileName), transferCallback);
     }
 
     /// <summary>Appends a local file to a remote file, asynchronously.</summary>
@@ -350,8 +338,8 @@ public sealed partial class FTPSClient
     /// <summary>Uploads a local file with a unique remote name and progress callback.</summary>
     public ulong PutUniqueFile(string localFileName, out string remoteFileName, FileTransferCallback transferCallback)
     {
-        using Stream s = PutUniqueFile(out remoteFileName);
-        return SendFile(localFileName, remoteFileName, s, transferCallback);
+        FTPStream dataStream = PutUniqueFile(out remoteFileName);
+        return SendFile(localFileName, remoteFileName, dataStream, transferCallback);
     }
 
     /// <summary>Uploads a local file under a server-generated unique name, asynchronously.</summary>
@@ -533,14 +521,14 @@ public sealed partial class FTPSClient
 
     internal static string GetRegexPattern(string filePattern, EPatternStyle patternStyle)
     {
-        string text = filePattern;
-        if ((uint)patternStyle <= 1u)
+        if (patternStyle == EPatternStyle.Regex)
         {
-            text = "^" + Regex.Escape(filePattern) + "$";
-            if (patternStyle == EPatternStyle.Wildcard)
-            {
-                text = text.Replace("\\*", ".*").Replace("\\?", ".{1}");
-            }
+            return filePattern;
+        }
+        string text = "^" + Regex.Escape(filePattern) + "$";
+        if (patternStyle == EPatternStyle.Wildcard)
+        {
+            text = text.Replace("\\*", ".*").Replace("\\?", ".{1}");
         }
         return text;
     }
@@ -609,16 +597,41 @@ public sealed partial class FTPSClient
         return total;
     }
 
-    private ulong SendFile(string localFileName, string remoteFileName, Stream s, FileTransferCallback transferCallback)
+    private ulong SendFile(string localFileName, string remoteFileName, FTPStream dataStream, FileTransferCallback transferCallback)
     {
         ulong? fileTransferSize = (transferCallback != null) ? (ulong)new FileInfo(localFileName).Length : (ulong?)null;
-        ulong total;
-        using (FileStream fileStream = OpenForRead(localFileName, useAsync: false))
+        ulong total = RunTransfer(dataStream, () =>
         {
-            total = CopyWithProgress(fileStream, s, ETransferActions.FileUploadingStatus, localFileName, remoteFileName, fileTransferSize, transferCallback);
-        }
-        s.Close();
+            using (FileStream fileStream = OpenForRead(localFileName, useAsync: false))
+            {
+                return CopyWithProgress(fileStream, dataStream, ETransferActions.FileUploadingStatus, localFileName, remoteFileName, fileTransferSize, transferCallback);
+            }
+        });
         CallTransferCallback(transferCallback, ETransferActions.FileUploaded, localFileName, remoteFileName, total, fileTransferSize);
+        return total;
+    }
+
+    // Runs the data phase, then closes the stream, which settles the control channel. If the data
+    // phase failed the server still owes a 426/451 for the aborted transfer: the close consumes it
+    // but its error must not replace the failure the caller actually needs to see.
+    private static ulong RunTransfer(FTPStream dataStream, Func<ulong> dataPhase)
+    {
+        ulong total;
+        try
+        {
+            total = dataPhase();
+        }
+        catch (Exception failure)
+        {
+            try
+            {
+                dataStream.Close();
+            }
+            catch (Exception) { }
+            ExceptionDispatchInfo.Capture(failure).Throw();
+            throw;
+        }
+        dataStream.Close();
         return total;
     }
 

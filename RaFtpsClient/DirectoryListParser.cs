@@ -5,7 +5,7 @@ using System.Text.RegularExpressions;
 
 namespace RaFtpsClient;
 
-internal class DirectoryListParser
+internal static class DirectoryListParser
 {
     private enum EDirectoryListingStyle
     {
@@ -15,26 +15,42 @@ internal class DirectoryListParser
     }
 
     private const string unixSymLinkPathSeparator = " -> ";
+    private static readonly CultureInfo listingCulture = CultureInfo.GetCultureInfo("en-US");
+
+    // The type character covers links, sockets and device nodes as well as files and directories,
+    // and the execute positions carry setuid/setgid/sticky bits, so a listing of nothing but
+    // symlinks or setgid directories must still be recognised as Unix style. Anchored at the start
+    // only, so the whole line can be tested without cutting a prefix off it first.
+    private static readonly Regex unixStylePattern = new Regex("^[bcdlpsD-][r-][w-][xsS-][r-][w-][xsS-][r-][w-][xtT-]", RegexOptions.Compiled);
+    private static readonly Regex windowsStylePattern = new Regex("^[0-9][0-9]-[0-9][0-9]-[0-9][0-9]", RegexOptions.Compiled);
 
     public static IList<DirectoryListItem> GetDirectoryList(string datastring)
     {
         try
         {
             List<DirectoryListItem> list = new List<DirectoryListItem>();
-            string[] array = datastring.Split(new char[1] { '\n' });
-            EDirectoryListingStyle eDirectoryListingStyle = GuessDirectoryListingStyle(array);
-            foreach (string text in array)
+            string[] records = datastring.Split('\n');
+            EDirectoryListingStyle style = GuessDirectoryListingStyle(records);
+            if (style == EDirectoryListingStyle.Unknown)
             {
-                if (eDirectoryListingStyle == EDirectoryListingStyle.Unknown || text.Trim().Length == 0)
+                return list;
+            }
+            // ls omits the year on recent entries and the parser assumes the current one, so a
+            // December file read in January would land eleven months in the future. Evaluated once
+            // per listing rather than per record.
+            DateTime futureLimit = DateTime.Now.AddDays(1.0);
+            foreach (string record in records)
+            {
+                if (string.IsNullOrWhiteSpace(record))
                 {
                     continue;
                 }
-                DirectoryListItem directoryListItem;
+                DirectoryListItem item;
                 try
                 {
-                    directoryListItem = ((eDirectoryListingStyle == EDirectoryListingStyle.UnixStyle)
-                        ? ParseDirectoryListItemFromUnixStyleRecord(text)
-                        : ParseDirectoryListItemFromWindowsStyleRecord(text));
+                    item = (style == EDirectoryListingStyle.UnixStyle)
+                        ? ParseUnixStyleRecord(record, futureLimit)
+                        : ParseWindowsStyleRecord(record);
                 }
                 catch (Exception)
                 {
@@ -42,9 +58,9 @@ internal class DirectoryListParser
                     // cannot read is no reason to discard the whole listing.
                     continue;
                 }
-                if (directoryListItem != null && directoryListItem.Name != "." && directoryListItem.Name != "..")
+                if (item != null && item.Name != "." && item.Name != "..")
                 {
-                    list.Add(directoryListItem);
+                    list.Add(item);
                 }
             }
             return list;
@@ -55,43 +71,15 @@ internal class DirectoryListParser
         }
     }
 
-    private static DirectoryListItem ParseDirectoryListItemFromWindowsStyleRecord(string record)
+    private static EDirectoryListingStyle GuessDirectoryListingStyle(string[] records)
     {
-        DirectoryListItem directoryListItem = new DirectoryListItem();
-        string text = record.Trim();
-        string text2 = text.Substring(0, 8);
-        text = text.Substring(8, text.Length - 8).Trim();
-        string text3 = text.Substring(0, 7);
-        text = text.Substring(7, text.Length - 7).Trim();
-        directoryListItem.CreationTime = DateTime.Parse(text2 + " " + text3, CultureInfo.GetCultureInfo("en-US"));
-        if (text.Substring(0, 5) == "<DIR>")
+        foreach (string record in records)
         {
-            directoryListItem.IsDirectory = true;
-            text = text.Substring(5, text.Length - 5).Trim();
-        }
-        else
-        {
-            directoryListItem.IsDirectory = false;
-            int num = text.IndexOf(' ');
-            directoryListItem.Size = ulong.Parse(text.Substring(0, num));
-            text = text.Substring(num + 1);
-        }
-        directoryListItem.Name = text;
-        return directoryListItem;
-    }
-
-    private static EDirectoryListingStyle GuessDirectoryListingStyle(string[] recordList)
-    {
-        foreach (string text in recordList)
-        {
-            // The type character covers links, sockets and device nodes as well as files and
-            // directories, and the execute positions carry setuid/setgid/sticky bits, so a listing of
-            // nothing but symlinks or setgid directories must still be recognised as Unix style.
-            if (text.Length > 10 && Regex.IsMatch(text.Substring(0, 10), "^[bcdlpsD-][r-][w-][xsS-][r-][w-][xsS-][r-][w-][xtT-]$"))
+            if (record.Length > 10 && unixStylePattern.IsMatch(record))
             {
                 return EDirectoryListingStyle.UnixStyle;
             }
-            if (text.Length > 8 && Regex.IsMatch(text.Substring(0, 8), "[0-9][0-9]-[0-9][0-9]-[0-9][0-9]"))
+            if (record.Length > 8 && windowsStylePattern.IsMatch(record))
             {
                 return EDirectoryListingStyle.WindowsStyle;
             }
@@ -99,54 +87,138 @@ internal class DirectoryListParser
         return EDirectoryListingStyle.Unknown;
     }
 
-    private static DirectoryListItem ParseDirectoryListItemFromUnixStyleRecord(string record)
+    // "MM-dd-yy  hh:mmAM  <DIR>|size  name"
+    private static DirectoryListItem ParseWindowsStyleRecord(string record)
     {
-        if (record.ToLower().StartsWith("total "))
+        string text = record.Trim();
+        int pos = 0;
+        string date = NextToken(text, ref pos);
+        string time = NextToken(text, ref pos);
+        string sizeOrDir = NextToken(text, ref pos);
+        DirectoryListItem item = new DirectoryListItem
+        {
+            CreationTime = DateTime.Parse(date + " " + time, listingCulture),
+            IsDirectory = sizeOrDir == "<DIR>",
+            Name = Rest(text, pos)
+        };
+        if (!item.IsDirectory)
+        {
+            item.Size = ulong.Parse(sizeOrDir, NumberStyles.None, CultureInfo.InvariantCulture);
+        }
+        return item;
+    }
+
+    // "drwxr-xr-x  2 owner group  4096 May 31 12:00 name [-> target]"
+    private static DirectoryListItem ParseUnixStyleRecord(string record, DateTime futureLimit)
+    {
+        if (record.StartsWith("total ", StringComparison.OrdinalIgnoreCase))
         {
             return null;
         }
-        DirectoryListItem directoryListItem = new DirectoryListItem();
         string text = record.Trim();
-        // Type character plus nine permission bits: taking only nine dropped the world-execute bit.
-        directoryListItem.Flags = text.Substring(0, 10);
-        directoryListItem.IsDirectory = directoryListItem.Flags[0] == 'd';
-        directoryListItem.IsSymLink = directoryListItem.Flags[0] == 'l';
-        text = text.Substring(11).Trim();
-        CutSubstringFromStringWithTrim(ref text, " ", 0);
-        directoryListItem.Owner = CutSubstringFromStringWithTrim(ref text, " ", 0);
-        directoryListItem.Group = CutSubstringFromStringWithTrim(ref text, " ", 0);
-        directoryListItem.Size = ulong.Parse(CutSubstringFromStringWithTrim(ref text, " ", 0));
-        string text2 = CutSubstringFromStringWithTrim(ref text, " ", 8);
-        string format = ((text2.IndexOf(':') >= 0) ? "MMM dd H:mm" : "MMM dd yyyy");
-        if (text2.Length > 4 && text2[4] == ' ')
+        // Type character plus nine permission bits. Position 10 is skipped unconditionally: it is
+        // either the separating space or an ACL marker ("+", ".") glued to the permissions.
+        string flags = text.Substring(0, 10);
+        int pos = 11;
+        NextToken(text, ref pos);                    // link count
+        string owner = NextToken(text, ref pos);
+        string group = NextToken(text, ref pos);
+        string size = NextToken(text, ref pos);
+        string month = NextToken(text, ref pos);
+        string day = NextToken(text, ref pos);
+        string yearOrTime = NextToken(text, ref pos);
+        string name = Rest(text, pos);
+
+        DirectoryListItem item = new DirectoryListItem
         {
-            text2 = text2.Substring(0, 4) + "0" + text2.Substring(5);
-        }
-        DateTime timestamp = DateTime.ParseExact(text2, format, CultureInfo.GetCultureInfo("en-US"), DateTimeStyles.AllowWhiteSpaces);
-        // ls omits the year on recent entries, so ParseExact assumes the current one: a December
-        // file read in January would otherwise be dated eleven months into the future.
-        if (format == "MMM dd H:mm" && timestamp > DateTime.Now.AddDays(1.0))
+            Flags = flags,
+            IsDirectory = flags[0] == 'd',
+            IsSymLink = flags[0] == 'l',
+            Owner = owner,
+            Group = group,
+            Size = ulong.Parse(size, NumberStyles.None, CultureInfo.InvariantCulture),
+            CreationTime = ParseUnixTimestamp(month, day, yearOrTime, futureLimit)
+        };
+        if (item.IsSymLink)
         {
-            timestamp = timestamp.AddYears(-1);
+            int arrow = name.IndexOf(unixSymLinkPathSeparator, StringComparison.Ordinal);
+            if (arrow > 0)
+            {
+                item.SymLinkTargetPath = name.Substring(arrow + unixSymLinkPathSeparator.Length);
+                name = name.Substring(0, arrow);
+            }
         }
-        directoryListItem.CreationTime = timestamp;
-        if (directoryListItem.IsSymLink && text.IndexOf(" -> ") > 0)
-        {
-            directoryListItem.Name = CutSubstringFromStringWithTrim(ref text, " -> ", 0);
-            directoryListItem.SymLinkTargetPath = text;
-        }
-        else
-        {
-            directoryListItem.Name = text;
-        }
-        return directoryListItem;
+        item.Name = name;
+        return item;
     }
 
-    private static string CutSubstringFromStringWithTrim(ref string s, string str, int startIndex)
+    private static readonly string[] monthNames = { "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec" };
+
+    // "May 31 12:00" or "May 31 2019". The fields are assembled directly because DateTime.ParseExact
+    // and the string it needs building were most of the cost of parsing a large listing; anything
+    // that does not fit the two shapes falls back to it.
+    private static DateTime ParseUnixTimestamp(string month, string day, string yearOrTime, DateTime futureLimit)
     {
-        int num = s.IndexOf(str, startIndex);
-        string result = s.Substring(0, num);
-        s = s.Substring(num + str.Length).Trim();
-        return result;
+        bool hasTime = yearOrTime.IndexOf(':') >= 0;
+        int monthNumber = Array.IndexOf(monthNames, month.ToLowerInvariant()) + 1;
+        if (monthNumber > 0 && TryParseSmallInt(day, out int dayNumber))
+        {
+            if (hasTime)
+            {
+                int colon = yearOrTime.IndexOf(':');
+                if (TryParseSmallInt(yearOrTime.Substring(0, colon), out int hour)
+                    && TryParseSmallInt(yearOrTime.Substring(colon + 1), out int minute)
+                    && TryMakeDate(futureLimit.Year, monthNumber, dayNumber, hour, minute, out DateTime withTime))
+                {
+                    return withTime > futureLimit ? withTime.AddYears(-1) : withTime;
+                }
+            }
+            else if (TryParseSmallInt(yearOrTime, out int year) && TryMakeDate(year, monthNumber, dayNumber, 0, 0, out DateTime withYear))
+            {
+                return withYear;
+            }
+        }
+        string text = month + " " + day.PadLeft(2, '0') + " " + yearOrTime;
+        DateTime timestamp = DateTime.ParseExact(text, hasTime ? "MMM dd H:mm" : "MMM dd yyyy", listingCulture, DateTimeStyles.None);
+        return (hasTime && timestamp > futureLimit) ? timestamp.AddYears(-1) : timestamp;
+    }
+
+    private static bool TryMakeDate(int year, int month, int day, int hour, int minute, out DateTime result)
+    {
+        result = default;
+        if (year < 1 || year > 9999 || day < 1 || day > DateTime.DaysInMonth(year, month) || hour > 23 || minute > 59) return false;
+        result = new DateTime(year, month, day, hour, minute, 0);
+        return true;
+    }
+
+    private static bool TryParseSmallInt(string s, out int value)
+    {
+        value = 0;
+        if (s.Length == 0 || s.Length > 4) return false;
+        foreach (char c in s)
+        {
+            if (c < '0' || c > '9') return false;
+            value = value * 10 + (c - '0');
+        }
+        return true;
+    }
+
+    /// <summary>Returns the next space-delimited token starting at <paramref name="pos"/>, leaving
+    /// <paramref name="pos"/> on the character after it.</summary>
+    private static string NextToken(string s, ref int pos)
+    {
+        while (pos < s.Length && s[pos] == ' ') pos++;
+        int start = pos;
+        while (pos < s.Length && s[pos] != ' ') pos++;
+        if (start == pos) throw new FormatException("Unexpected end of listing record");
+        return s.Substring(start, pos - start);
+    }
+
+    /// <summary>Everything after the current position, minus the delimiting spaces. Names keep their
+    /// own inner spaces.</summary>
+    private static string Rest(string s, int pos)
+    {
+        while (pos < s.Length && s[pos] == ' ') pos++;
+        return s.Substring(pos);
     }
 }

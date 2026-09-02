@@ -15,7 +15,12 @@ is git-ignored and local only, never part of the source or the package. Decompil
 dotnet build                # netstandard2.0, must stay warning-clean
 dotnet test                 # tests/RaFtpsClient.Tests, net10.0, xunit
 dotnet test --filter FullyQualifiedName~KeepAliveTests
+dotnet run -c Release --project tests/RaFtpsClient.Benchmarks   # parser/reader/path micro-benchmarks
 ```
+
+Performance claims get a number, not an adjective: run the benchmarks before and after on the same
+machine and quote both. The parser, `LocalPathAllocator`, `PathCheck` and `ControlChannelReader`
+are the CPU-bound parts; the transport is network-bound and not benchmarked.
 
 `tests/RaFtpsClient.Tests` covers the parsers directly and drives the client end to end against
 `FakeFtpServer`, an in-process server on a loopback socket that speaks enough of RFC 959 and RFC 4217
@@ -77,6 +82,10 @@ one, the other is visibly missing the change — that adjacency is the whole poi
   stale reply, which is what `FTPStream`'s close callback does for the sync path.
 - `FTPSClient.Directories.cs` — listings and working directory.
 - `DirectoryListParser` — heuristic LIST parsing (Unix `ls -l` and Windows styles); no MLSD support.
+  Records are tokenised by index (`NextToken`/`Rest`) and Unix timestamps are assembled directly,
+  with `DateTime.ParseExact` as the fallback: those two were most of the cost of a large listing.
+- `LocalPathAllocator` — case-insensitive local path deduplication for recursive downloads, with a
+  per-name suffix hint so repeated names stay linear.
 
 Timeouts: the sync path relies on `ReadTimeout`/`WriteTimeout`, which do nothing for async I/O, so the
 async path enforces the same `timeout` through `TimeoutScope` (a linked CTS with `CancelAfter`),

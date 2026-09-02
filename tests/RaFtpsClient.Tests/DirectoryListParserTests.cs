@@ -52,6 +52,43 @@ public class DirectoryListParserTests
         Assert.Equal(isSymLink, item.IsSymLink);
     }
 
+    // SELinux and ACL-bearing files carry a marker glued to the permissions; the field after it is
+    // still the link count, never the owner.
+    [Theory]
+    [InlineData("drwxr-xr-x. 2 owner grp 4096 May 31 12:00 selinux")]
+    [InlineData("drwxr-xr-x+ 2 owner grp 4096 May 31 12:00 acl")]
+    [InlineData("drwxr-xr-x  2 owner grp 4096 May 31 12:00 padded")]
+    [InlineData("drwxr-xr-x 12 owner grp 4096 May 31 12:00 wide")]
+    public void SkipsAnyMarkerAfterThePermissions(string record)
+    {
+        DirectoryListItem item = Single(record);
+
+        Assert.Equal("drwxr-xr-x", item.Flags);
+        Assert.Equal("owner", item.Owner);
+        Assert.Equal("grp", item.Group);
+        Assert.Equal(4096uL, item.Size);
+        Assert.True(item.IsDirectory);
+    }
+
+    [Theory]
+    [InlineData("-rw-r--r-- 1 o g 5 May 31 12:00 x", 5, 31, 12, 0)]
+    [InlineData("-rw-r--r-- 1 o g 5 Dec 3 9:05 x", 12, 3, 9, 5)]
+    [InlineData("-rw-r--r-- 1 o g 5 Feb 29 2020 x", 2, 29, 0, 0)]
+    [InlineData("-rw-r--r-- 1 o g 5 JAN 1 2019 x", 1, 1, 0, 0)]
+    public void ReadsEveryTimestampField(string record, int month, int day, int hour, int minute)
+    {
+        DateTime t = Single(record).CreationTime;
+
+        Assert.Equal((month, day, hour, minute), (t.Month, t.Day, t.Hour, t.Minute));
+    }
+
+    [Fact]
+    public void RejectsAnImpossibleDateInsteadOfInventingOne()
+    {
+        // Feb 30 is not a date; the record is skipped rather than parsed into something plausible.
+        Assert.Empty(DirectoryListParser.GetDirectoryList("-rw-r--r-- 1 o g 5 Feb 30 2019 x\r\n"));
+    }
+
     [Fact]
     public void ParsesSymLinkTargets()
     {

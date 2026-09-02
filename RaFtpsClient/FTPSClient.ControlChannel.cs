@@ -5,7 +5,6 @@ using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -16,7 +15,6 @@ namespace RaFtpsClient;
 // are kept adjacent so a change to one is visibly missing from the other.
 public sealed partial class FTPSClient
 {
-    private static readonly Regex replyLinePattern = new Regex("^([0-9]{3})([\\s\\-])(.*)$", RegexOptions.Compiled);
     private static readonly Encoding controlEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
     // ----- connection -----------------------------------------------------------------------------
@@ -453,14 +451,28 @@ public sealed partial class FTPSClient
         public FTPReply Reply { get; } = new FTPReply();
         public bool IsComplete { get; private set; }
 
+        // A reply line is three digits, then a space (final line) or a hyphen (continuation).
+        private static bool TryParseReplyLine(string line, out int code, out bool isFinal, out string text)
+        {
+            code = 0;
+            isFinal = false;
+            text = null;
+            if (line.Length < 4 || !IsDigit(line[0]) || !IsDigit(line[1]) || !IsDigit(line[2])) return false;
+            char separator = line[3];
+            if (separator != '-' && !char.IsWhiteSpace(separator)) return false;
+            code = (line[0] - '0') * 100 + (line[1] - '0') * 10 + (line[2] - '0');
+            isFinal = separator == ' ';
+            text = line.Substring(4);
+            return true;
+        }
+
+        private static bool IsDigit(char c) => c >= '0' && c <= '9';
+
         public void Add(string line)
         {
-            Match match = replyLinePattern.Match(line);
-            if (match.Success)
+            if (TryParseReplyLine(line, out int code, out bool isFinal, out string text))
             {
-                int code = int.Parse(match.Groups[1].Value);
-                string text = match.Groups[3].Value;
-                IsComplete = match.Groups[2].Value == " ";
+                IsComplete = isFinal;
                 if (Reply.Code == 0)
                 {
                     Reply.Code = code;

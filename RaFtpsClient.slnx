@@ -1,4 +1,5 @@
 <Solution>
   <Project Path="RaFtpsClient/RaFtpsClient.csproj" />
   <Project Path="tests/RaFtpsClient.Tests/RaFtpsClient.Tests.csproj" />
+  <Project Path="tests/RaFtpsClient.Benchmarks/RaFtpsClient.Benchmarks.csproj" />
 </Solution>
