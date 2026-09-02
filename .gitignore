@@ -22,3 +22,4 @@ packages/
 
 # Local reference material (decompiled upstream, original nupkg); not part of the source
 temp/
+artifacts/
